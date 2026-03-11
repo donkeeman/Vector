@@ -1,9 +1,7 @@
-const COMMAND_ALIASES = new Map([
-  ["!start", "start"],
-  ["!stop", "stop"],
-]);
+const COMMAND_PATTERN = /^[!！]\s*(start|stop)\b/iu;
 
 export function normalizeControlCommand(input) {
-  const normalized = input.trim().toLowerCase();
-  return COMMAND_ALIASES.get(normalized) ?? null;
+  const normalized = String(input ?? "").trim().toLowerCase();
+  const matched = normalized.match(COMMAND_PATTERN);
+  return matched?.[1] ?? null;
 }

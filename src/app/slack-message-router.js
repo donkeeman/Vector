@@ -137,6 +137,23 @@ export class SlackMessageRouter {
   }
 
   async #handleThreadReply(event) {
+    const command = normalizeControlCommand(event.text);
+    if (command) {
+      this.logger.debug("router.route.control_thread", {
+        channel: event.channel,
+        ts: event.ts,
+        threadTs: event.thread_ts,
+        command,
+      });
+      try {
+        const session = await this.tutorBot.applyControlCommand(command, this.now());
+        await this.onControlCommandApplied(command, session);
+      } catch (error) {
+        this.onError(error, event);
+      }
+      return null;
+    }
+
     const thread = await this.store.getThread(event.thread_ts);
 
     if (thread?.kind === "direct_qa") {

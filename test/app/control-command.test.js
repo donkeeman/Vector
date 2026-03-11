@@ -6,6 +6,9 @@ import { normalizeControlCommand } from "../../src/app/control-command.js";
 test("제어 명령 의미는 !start/!stop으로만 정규화된다", () => {
   assert.equal(normalizeControlCommand("!start"), "start");
   assert.equal(normalizeControlCommand("!stop"), "stop");
+  assert.equal(normalizeControlCommand("!start 지금"), "start");
+  assert.equal(normalizeControlCommand("  !stop   해 "), "stop");
+  assert.equal(normalizeControlCommand("！start"), "start");
 });
 
 test("지원하지 않는 입력은 제어 명령으로 간주하지 않는다", () => {

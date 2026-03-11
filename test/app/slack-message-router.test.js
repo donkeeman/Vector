@@ -570,6 +570,58 @@ test("DM 스레드 reply는 TutorBot.handleThreadMessage로 전달된다", async
   assert.equal(closedThreadSignals[0].shouldScheduleNextQuestion, true);
 });
 
+test("DM 스레드 !start/!stop도 제어 명령으로 처리한다", async () => {
+  const controlCalls = [];
+  const controlHooks = [];
+  const threadCalls = [];
+  const router = new SlackMessageRouter({
+    store: createStore(),
+    tutorBot: {
+      async applyControlCommand(command, now) {
+        controlCalls.push({ command, now });
+        return {
+          state: command === "start" ? "active" : "paused",
+        };
+      },
+      async handleThreadMessage(payload) {
+        threadCalls.push(payload);
+        return null;
+      },
+    },
+    llmRunner: createUnusedLlmRunner(),
+    slackClient: createSlackClient(),
+    now: () => new Date("2026-03-10T17:02:00+09:00"),
+    onControlCommandApplied(command, session) {
+      controlHooks.push({ command, session });
+    },
+  });
+
+  await router.handleMessageEvent({
+    type: "message",
+    channel_type: "im",
+    channel: "D123",
+    user: "U123",
+    text: "!stop",
+    ts: "1000.41",
+    thread_ts: "1000.1",
+  });
+
+  await router.handleMessageEvent({
+    type: "message",
+    channel_type: "im",
+    channel: "D123",
+    user: "U123",
+    text: "!start 지금",
+    ts: "1000.42",
+    thread_ts: "1000.1",
+  });
+
+  assert.deepEqual(controlCalls.map(({ command }) => command), ["stop", "start"]);
+  assert.deepEqual(controlHooks.map(({ command }) => command), ["stop", "start"]);
+  assert.deepEqual(threadCalls, []);
+  assert.deepEqual(router.slackClient.replies, []);
+});
+
 test("direct_qa 스레드 reply는 history를 싣고 direct_thread_turn으로 이어진다", async () => {
   const calls = [];
   const slackClient = createSlackClient();

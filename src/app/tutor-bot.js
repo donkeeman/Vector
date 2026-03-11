@@ -15,7 +15,6 @@ import {
 } from "../domain/thread-policy.js";
 import {
   createEmptyTopicMemory,
-  pickNextTopic,
   updateTopicMemory,
 } from "../domain/topic-memory.js";
 
@@ -28,11 +27,19 @@ const NOOP_LOGGER = {
 };
 
 export class TutorBot {
-  constructor({ store, llmRunner, slackClient, topics, logger = NOOP_LOGGER }) {
+  constructor({
+    store,
+    llmRunner,
+    slackClient,
+    topics,
+    topicSelector = pickTopicForContinuousFlow,
+    logger = NOOP_LOGGER,
+  }) {
     this.store = store;
     this.llmRunner = llmRunner;
     this.slackClient = slackClient;
     this.topics = topics;
+    this.topicSelector = topicSelector;
     this.logger = logger;
     this.dispatchInFlight = null;
   }
@@ -141,15 +148,14 @@ export class TutorBot {
       return null;
     }
 
-    const topic = pickNextTopic({
+    const topic = this.topicSelector({
       now,
       topics: this.topics,
-      memories: await this.store.getTopicMemories(),
     });
 
     if (!topic) {
       this.logger.debug("tutor_bot.dispatch_skipped", {
-        reason: "no_due_topic",
+        reason: "no_topic_available",
       });
       return null;
     }
@@ -303,4 +309,25 @@ function mergeRationale(rationale, addition) {
   }
 
   return `${rationale} ${addition}`;
+}
+
+function pickTopicForContinuousFlow({ topics }) {
+  if (!Array.isArray(topics) || topics.length === 0) {
+    return null;
+  }
+
+  const weighted = topics
+    .map((topic) => ({
+      topic,
+      effectiveWeight: Math.max(1, topic.weight),
+    }))
+    .sort((left, right) => {
+      if (right.effectiveWeight !== left.effectiveWeight) {
+        return right.effectiveWeight - left.effectiveWeight;
+      }
+
+      return left.topic.id.localeCompare(right.topic.id);
+    });
+
+  return weighted[0].topic;
 }
