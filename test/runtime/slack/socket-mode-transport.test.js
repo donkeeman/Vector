@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { SocketModeTransport } from "../../../src/runtime/slack/socket-mode-transport.js";
 
-test("Socket Mode transport는 events_api를 ack한 뒤 메시지 핸들러에 전달한다", async () => {
+test("Socket Mode transport는 message 이벤트를 ack한 뒤 메시지 핸들러에 전달한다", async () => {
   const events = [];
   const fakeClient = createFakeSocketClient();
   const callOrder = [];
@@ -18,7 +18,7 @@ test("Socket Mode transport는 events_api를 ack한 뒤 메시지 핸들러에 �
 
   await transport.start();
 
-  await fakeClient.emitEvent("events_api", {
+  await fakeClient.emitEvent("message", {
     ack: async () => {
       callOrder.push("ack");
     },
@@ -47,7 +47,7 @@ test("Socket Mode transport는 events_api를 ack한 뒤 메시지 핸들러에 �
   ]);
 });
 
-test("Socket Mode transport는 핸들러 에러가 나도 예외를 삼키고 onError로 넘긴다", async () => {
+test("Socket Mode transport는 message 핸들러 에러가 나도 예외를 삼키고 onError로 넘긴다", async () => {
   const fakeClient = createFakeSocketClient();
   const errors = [];
   const transport = new SocketModeTransport({
@@ -63,7 +63,7 @@ test("Socket Mode transport는 핸들러 에러가 나도 예외를 삼키고 on
 
   await transport.start();
 
-  await fakeClient.emitEvent("events_api", {
+  await fakeClient.emitEvent("message", {
     ack: async () => {},
     body: {
       event: {
