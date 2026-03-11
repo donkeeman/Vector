@@ -1,13 +1,28 @@
-export function createThreadState({ slackThreadTs, topicId, openedAt }) {
+export function createThreadState({
+  slackThreadTs,
+  topicId = null,
+  openedAt,
+  kind = "study",
+  mode = kind === "direct_qa" ? "direct_qa" : "evaluation",
+  blockedOnce = false,
+  codexSessionId = null,
+  directQaState = kind === "direct_qa" ? "open" : null,
+  lastAssistantPrompt = null,
+}) {
   return {
     slackThreadTs,
     topicId,
+    kind,
     openedAt,
     closedAt: null,
-    mode: "evaluation",
+    mode,
     status: "open",
+    blockedOnce,
     lastCounterQuestionAt: null,
     lastCounterQuestionResolvedAt: null,
+    codexSessionId,
+    directQaState,
+    lastAssistantPrompt,
   };
 }
 

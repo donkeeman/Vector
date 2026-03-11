@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { createInactiveSession } from "../domain/session-policy.js";
 
 const execFileAsync = promisify(execFile);
+const DIRECT_QA_TOPIC_SENTINEL = "__direct_qa__";
 
 export class SqliteStore {
   constructor({ databasePath }) {
@@ -32,6 +33,7 @@ export class SqliteStore {
         success_count INTEGER NOT NULL,
         failure_count INTEGER NOT NULL,
         last_outcome TEXT,
+        last_mastery_kind TEXT,
         next_review_at TEXT,
         mastered_streak INTEGER NOT NULL
       );
@@ -39,8 +41,13 @@ export class SqliteStore {
       CREATE TABLE IF NOT EXISTS threads (
         slack_thread_ts TEXT PRIMARY KEY,
         topic_id TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'study',
         status TEXT NOT NULL,
         mode TEXT NOT NULL,
+        codex_session_id TEXT,
+        direct_qa_state TEXT,
+        last_assistant_prompt TEXT,
+        blocked_once INTEGER NOT NULL DEFAULT 0,
         opened_at TEXT NOT NULL,
         closed_at TEXT,
         last_counter_question_at TEXT,
@@ -56,7 +63,18 @@ export class SqliteStore {
         rationale TEXT,
         recorded_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS direct_qa_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_ts TEXT NOT NULL,
+        role TEXT NOT NULL,
+        text TEXT NOT NULL,
+        recorded_at TEXT NOT NULL
+      );
     `);
+
+    await this.#ensureThreadColumns();
+    await this.#ensureTopicMemoryColumns();
   }
 
   async getSession() {
@@ -113,17 +131,27 @@ export class SqliteStore {
       INSERT INTO threads (
         slack_thread_ts,
         topic_id,
+        kind,
         status,
         mode,
+        codex_session_id,
+        direct_qa_state,
+        last_assistant_prompt,
+        blocked_once,
         opened_at,
         closed_at,
         last_counter_question_at,
         last_counter_question_resolved_at
       ) VALUES (
         ${toSqlString(thread.slackThreadTs)},
-        ${toSqlString(thread.topicId)},
+        ${toSqlString(toStoredTopicId(thread.topicId))},
+        ${toSqlString(thread.kind ?? "study")},
         ${toSqlString(thread.status)},
         ${toSqlString(thread.mode)},
+        ${toSqlString(thread.codexSessionId)},
+        ${toSqlString(thread.directQaState)},
+        ${toSqlString(thread.lastAssistantPrompt)},
+        ${toSqlInteger(thread.blockedOnce)},
         ${toSqlDate(thread.openedAt)},
         ${toSqlDate(thread.closedAt)},
         ${toSqlDate(thread.lastCounterQuestionAt)},
@@ -131,12 +159,45 @@ export class SqliteStore {
       )
       ON CONFLICT(slack_thread_ts) DO UPDATE SET
         topic_id = excluded.topic_id,
+        kind = excluded.kind,
         status = excluded.status,
         mode = excluded.mode,
+        codex_session_id = excluded.codex_session_id,
+        direct_qa_state = excluded.direct_qa_state,
+        last_assistant_prompt = excluded.last_assistant_prompt,
+        blocked_once = excluded.blocked_once,
         opened_at = excluded.opened_at,
         closed_at = excluded.closed_at,
         last_counter_question_at = excluded.last_counter_question_at,
         last_counter_question_resolved_at = excluded.last_counter_question_resolved_at;
+    `);
+  }
+
+  async listDirectQaMessages(threadTs) {
+    const rows = await this.#query(
+      `SELECT * FROM direct_qa_messages WHERE thread_ts = ${toSqlString(threadTs)} ORDER BY id ASC;`,
+    );
+    return rows.map((row) => ({
+      threadTs: row.thread_ts,
+      role: row.role,
+      text: row.text,
+      recordedAt: new Date(row.recorded_at),
+    }));
+  }
+
+  async saveDirectQaMessage(message) {
+    await this.#execute(`
+      INSERT INTO direct_qa_messages (
+        thread_ts,
+        role,
+        text,
+        recorded_at
+      ) VALUES (
+        ${toSqlString(message.threadTs)},
+        ${toSqlString(message.role)},
+        ${toSqlString(message.text)},
+        ${toSqlDate(message.recordedAt)}
+      );
     `);
   }
 
@@ -161,6 +222,7 @@ export class SqliteStore {
         success_count,
         failure_count,
         last_outcome,
+        last_mastery_kind,
         next_review_at,
         mastered_streak
       ) VALUES (
@@ -170,6 +232,7 @@ export class SqliteStore {
         ${memory.successCount},
         ${memory.failureCount},
         ${toSqlString(memory.lastOutcome)},
+        ${toSqlString(memory.lastMasteryKind)},
         ${toSqlDate(memory.nextReviewAt)},
         ${memory.masteredStreak}
       )
@@ -179,6 +242,7 @@ export class SqliteStore {
         success_count = excluded.success_count,
         failure_count = excluded.failure_count,
         last_outcome = excluded.last_outcome,
+        last_mastery_kind = excluded.last_mastery_kind,
         next_review_at = excluded.next_review_at,
         mastered_streak = excluded.mastered_streak;
     `);
@@ -221,6 +285,28 @@ export class SqliteStore {
       maxBuffer: 1024 * 1024 * 4,
     });
   }
+
+  async #ensureThreadColumns() {
+    const columns = await this.#query("PRAGMA table_info(threads);");
+    await this.#ensureColumn("threads", columns, "kind", "TEXT NOT NULL DEFAULT 'study'");
+    await this.#ensureColumn("threads", columns, "codex_session_id", "TEXT");
+    await this.#ensureColumn("threads", columns, "direct_qa_state", "TEXT");
+    await this.#ensureColumn("threads", columns, "last_assistant_prompt", "TEXT");
+    await this.#ensureColumn("threads", columns, "blocked_once", "INTEGER NOT NULL DEFAULT 0");
+  }
+
+  async #ensureTopicMemoryColumns() {
+    const columns = await this.#query("PRAGMA table_info(topic_memory);");
+    await this.#ensureColumn("topic_memory", columns, "last_mastery_kind", "TEXT");
+  }
+
+  async #ensureColumn(tableName, columns, name, definition) {
+    const hasColumn = columns.some((column) => column.name === name);
+
+    if (!hasColumn) {
+      await this.#execute(`ALTER TABLE ${tableName} ADD COLUMN ${name} ${definition};`);
+    }
+  }
 }
 
 function parseNullableDate(value) {
@@ -239,17 +325,34 @@ function toSqlString(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
 
+function toSqlInteger(value) {
+  return value ? 1 : 0;
+}
+
 function mapThreadRow(row) {
   return {
     slackThreadTs: row.slack_thread_ts,
-    topicId: row.topic_id,
+    topicId: fromStoredTopicId(row.topic_id),
+    kind: row.kind ?? "study",
     status: row.status,
     mode: row.mode,
+    codexSessionId: row.codex_session_id ?? null,
+    directQaState: row.direct_qa_state ?? null,
+    lastAssistantPrompt: row.last_assistant_prompt ?? null,
+    blockedOnce: Number(row.blocked_once ?? 0) === 1,
     openedAt: new Date(row.opened_at),
     closedAt: parseNullableDate(row.closed_at),
     lastCounterQuestionAt: parseNullableDate(row.last_counter_question_at),
     lastCounterQuestionResolvedAt: parseNullableDate(row.last_counter_question_resolved_at),
   };
+}
+
+function toStoredTopicId(topicId) {
+  return topicId ?? DIRECT_QA_TOPIC_SENTINEL;
+}
+
+function fromStoredTopicId(topicId) {
+  return topicId === DIRECT_QA_TOPIC_SENTINEL ? null : topicId;
 }
 
 function mapMemoryRow(row) {
@@ -259,6 +362,7 @@ function mapMemoryRow(row) {
     successCount: row.success_count,
     failureCount: row.failure_count,
     lastOutcome: row.last_outcome,
+    lastMasteryKind: row.last_mastery_kind ?? null,
     nextReviewAt: parseNullableDate(row.next_review_at),
     masteredStreak: row.mastered_streak,
   };
