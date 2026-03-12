@@ -314,6 +314,7 @@ function applyDirectQaReplyState(thread, reply) {
       mode: "direct_qa",
       directQaState: "awaiting_answer",
       lastAssistantPrompt: reply.challengePrompt ?? reply.text,
+      lastChallengePrompt: reply.challengePrompt ?? reply.text ?? thread.lastChallengePrompt ?? null,
       codexSessionId: reply.codexSessionId ?? thread.codexSessionId ?? null,
     };
   }
@@ -323,6 +324,7 @@ function applyDirectQaReplyState(thread, reply) {
     mode: "direct_qa",
     directQaState: "open",
     lastAssistantPrompt: null,
+    lastChallengePrompt: null,
     codexSessionId: reply?.codexSessionId ?? thread.codexSessionId ?? null,
   };
 }
@@ -357,6 +359,7 @@ function normalizeDirectQaThread(thread) {
     mode: "direct_qa",
     directQaState: thread.directQaState === "awaiting_answer" ? "awaiting_answer" : "open",
     lastAssistantPrompt: thread.lastAssistantPrompt ?? null,
+    lastChallengePrompt: thread.lastChallengePrompt ?? null,
     codexSessionId: thread.codexSessionId ?? null,
   };
 }

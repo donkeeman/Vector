@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 
 import {
   buildCodexExecArgs,
+  keepSingleQuestion,
+  normalizeBanmalText,
   parseCodexThreadIdFromStdout,
 } from "../../src/llm/codex-cli-runner.js";
 import { runWithRetry } from "../../src/llm/run-with-retry.js";
@@ -54,7 +56,7 @@ test("모든 재시도가 실패하면 마지막 에러를 던진다", async () 
 test("direct_question 지시는 반말 응답을 요구한다", () => {
   const source = readFileSync(new URL("../../src/llm/codex-cli-runner.js", import.meta.url), "utf8");
 
-  assert.match(source, /direct_question[\s\S]*반말/u);
+  assert.match(source, /direct_question[\s\S]*informal speech \(banmal\)/u);
 });
 
 test("direct_thread_turn 지시는 direct Q&A history를 활용한다", () => {
@@ -70,7 +72,7 @@ test("direct Q&A 지시는 오프트픽 거절 대신 계속 답변하도록 유
   assert.doesNotMatch(source, /direct_thread_turn[\s\S]*항복 선언 \(!stop\)/u);
 });
 
-test("evaluate task는 high reasoning으로 실행되고 direct question은 medium reasoning과 ephemeral을 쓴다", () => {
+test("evaluate와 direct question은 session-aware json 경로로 실행되고 reasoning profile을 유지한다", () => {
   const evaluateArgs = buildCodexExecArgs({
     taskType: "evaluate",
     outputPath: "/tmp/evaluate.json",
@@ -89,12 +91,14 @@ test("evaluate task는 high reasoning으로 실행되고 direct question은 medi
     "gpt-5.4",
     "exec",
     "--skip-git-repo-check",
-    "--sandbox",
-    "read-only",
-    "--ephemeral",
+    "--json",
+    "-c",
+    "model_reasoning_effort=\"high\"",
   ]);
   assert.match(evaluateArgs.join(" "), /model_reasoning_effort="high"/u);
   assert.match(directQuestionArgs.join(" "), /model_reasoning_effort="medium"/u);
+  assert.match(evaluateArgs.join(" "), /--json/u);
+  assert.doesNotMatch(evaluateArgs.join(" "), /--ephemeral/u);
   assert.match(directQuestionArgs.join(" "), /--json/u);
   assert.doesNotMatch(directQuestionArgs.join(" "), /--ephemeral/u);
 });
@@ -102,17 +106,35 @@ test("evaluate task는 high reasoning으로 실행되고 direct question은 medi
 test("teach 지시는 막힌 지점을 직접 교정하도록 요구한다", () => {
   const source = readFileSync(new URL("../../src/llm/codex-cli-runner.js", import.meta.url), "utf8");
 
-  assert.match(source, /teach[\s\S]*막힌/u);
-  assert.match(source, /teach[\s\S]*정답 구조/u);
+  assert.match(source, /teach[\s\S]*exact failure point/u);
+  assert.match(source, /teach[\s\S]*answer scaffold/u);
+  assert.match(source, /teach[\s\S]*thread\.lastAssistantPrompt/u);
+});
+
+test("study 평가/꼬리질문/교정 지시는 lastChallengePrompt를 기준으로 같은 지점을 추적한다", () => {
+  const source = readFileSync(new URL("../../src/llm/codex-cli-runner.js", import.meta.url), "utf8");
+
+  assert.match(source, /evaluate[\s\S]*lastChallengePrompt/u);
+  assert.match(source, /followup[\s\S]*lastChallengePrompt/u);
+  assert.match(source, /teach[\s\S]*lastChallengePrompt/u);
+  assert.match(source, /teach[\s\S]*challengePrompt/u);
 });
 
 test("질문과 direct Q&A 지시는 도발적 라이벌 톤을 직접 요구한다", () => {
   const source = readFileSync(new URL("../../src/llm/codex-cli-runner.js", import.meta.url), "utf8");
 
-  assert.match(source, /question[\s\S]*도발/u);
-  assert.match(source, /direct_question[\s\S]*라이벌/u);
-  assert.match(source, /direct_thread_turn[\s\S]*도발/u);
-  assert.match(source, /teach[\s\S]*비웃/u);
+  assert.match(source, /question[\s\S]*provocative/u);
+  assert.match(source, /direct_question[\s\S]*rival/u);
+  assert.match(source, /direct_thread_turn[\s\S]*provocative/u);
+  assert.match(source, /teach[\s\S]*mocking/u);
+});
+
+test("counterquestion 지시는 모호한 지시어를 lastAssistantPrompt로 해석하도록 강제한다", () => {
+  const source = readFileSync(new URL("../../src/llm/codex-cli-runner.js", import.meta.url), "utf8");
+
+  assert.match(source, /answer_counterquestion[\s\S]*ambiguous references/u);
+  assert.match(source, /answer_counterquestion[\s\S]*thread\.lastAssistantPrompt/u);
+  assert.match(source, /answer_counterquestion[\s\S]*Do not bounce back/u);
 });
 
 test("direct Q&A 지시는 질문을 문자 그대로 해석하고 숨은 의도를 지어내지 말라고 강제한다", () => {
@@ -180,4 +202,45 @@ test("codex json stdout에서 thread.started 이벤트의 id를 뽑아낸다", (
   ].join("\n"));
 
   assert.equal(threadId, "019cdb62-262f-7820-a256-93d1cb0fd0c2");
+});
+
+test("질문 후처리는 그리고로 이어진 다중 질문을 첫 질문 하나로 자른다", () => {
+  const normalized = keepSingleQuestion(
+    "setTimeout(0), Promise.then, requestAnimationFrame이 한 프레임 안에서 충돌할 때 실행 순서를 설명해봐, 그리고 마이크로태스크 폭주가 왜 페인트를 굶기는지도 설명해봐.",
+  );
+
+  assert.equal(
+    normalized,
+    "setTimeout(0), Promise.then, requestAnimationFrame이 한 프레임 안에서 충돌할 때 실행 순서를 설명해봐",
+  );
+});
+
+test("질문 후처리는 물음표가 여러 개면 첫 질문만 남긴다", () => {
+  const normalized = keepSingleQuestion(
+    "r1이 먼저야? p가 먼저야? 이유까지 말해봐.",
+  );
+
+  assert.equal(normalized, "r1이 먼저야?");
+});
+
+test("질문 후처리는 앞쪽 도발 질문을 버리고 기술 질문 하나만 남긴다", () => {
+  const normalized = keepSingleQuestion(
+    "자, 이 정도는 안 틀리겠지? setTimeout(0), Promise.then, requestAnimationFrame 순서를 단계별로 설명해봐?",
+  );
+
+  assert.equal(
+    normalized,
+    "setTimeout(0), Promise.then, requestAnimationFrame 순서를 단계별로 설명해봐?",
+  );
+});
+
+test("반말 후처리는 기본 존댓말 어미를 반말로 정규화한다", () => {
+  const normalized = normalizeBanmalText(
+    "그건 기본입니다. 다시 설명해주세요. 이 경우는 가능합니다.",
+  );
+
+  assert.equal(
+    normalized,
+    "그건 기본이야. 다시 설명해줘. 이 경우는 가능해.",
+  );
 });

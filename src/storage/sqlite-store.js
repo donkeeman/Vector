@@ -47,6 +47,7 @@ export class SqliteStore {
         codex_session_id TEXT,
         direct_qa_state TEXT,
         last_assistant_prompt TEXT,
+        last_challenge_prompt TEXT,
         blocked_once INTEGER NOT NULL DEFAULT 0,
         opened_at TEXT NOT NULL,
         closed_at TEXT,
@@ -75,6 +76,7 @@ export class SqliteStore {
 
     await this.#ensureThreadColumns();
     await this.#ensureTopicMemoryColumns();
+    await this.#reopenLegacyBlockedThreads();
   }
 
   async getSession() {
@@ -137,6 +139,7 @@ export class SqliteStore {
         codex_session_id,
         direct_qa_state,
         last_assistant_prompt,
+        last_challenge_prompt,
         blocked_once,
         opened_at,
         closed_at,
@@ -151,6 +154,7 @@ export class SqliteStore {
         ${toSqlString(thread.codexSessionId)},
         ${toSqlString(thread.directQaState)},
         ${toSqlString(thread.lastAssistantPrompt)},
+        ${toSqlString(thread.lastChallengePrompt)},
         ${toSqlInteger(thread.blockedOnce)},
         ${toSqlDate(thread.openedAt)},
         ${toSqlDate(thread.closedAt)},
@@ -165,6 +169,7 @@ export class SqliteStore {
         codex_session_id = excluded.codex_session_id,
         direct_qa_state = excluded.direct_qa_state,
         last_assistant_prompt = excluded.last_assistant_prompt,
+        last_challenge_prompt = excluded.last_challenge_prompt,
         blocked_once = excluded.blocked_once,
         opened_at = excluded.opened_at,
         closed_at = excluded.closed_at,
@@ -292,12 +297,24 @@ export class SqliteStore {
     await this.#ensureColumn("threads", columns, "codex_session_id", "TEXT");
     await this.#ensureColumn("threads", columns, "direct_qa_state", "TEXT");
     await this.#ensureColumn("threads", columns, "last_assistant_prompt", "TEXT");
+    await this.#ensureColumn("threads", columns, "last_challenge_prompt", "TEXT");
     await this.#ensureColumn("threads", columns, "blocked_once", "INTEGER NOT NULL DEFAULT 0");
   }
 
   async #ensureTopicMemoryColumns() {
     const columns = await this.#query("PRAGMA table_info(topic_memory);");
     await this.#ensureColumn("topic_memory", columns, "last_mastery_kind", "TEXT");
+  }
+
+  async #reopenLegacyBlockedThreads() {
+    // 과거 버전에서 종료 상태로 기록된 blocked 스레드를 현재 정책(open 유지)으로 복구합니다.
+    await this.#execute(`
+      UPDATE threads
+      SET
+        status = 'open',
+        closed_at = NULL
+      WHERE status = 'blocked';
+    `);
   }
 
   async #ensureColumn(tableName, columns, name, definition) {
@@ -339,6 +356,7 @@ function mapThreadRow(row) {
     codexSessionId: row.codex_session_id ?? null,
     directQaState: row.direct_qa_state ?? null,
     lastAssistantPrompt: row.last_assistant_prompt ?? null,
+    lastChallengePrompt: row.last_challenge_prompt ?? null,
     blockedOnce: Number(row.blocked_once ?? 0) === 1,
     openedAt: new Date(row.opened_at),
     closedAt: parseNullableDate(row.closed_at),

@@ -8,6 +8,7 @@ export function createThreadState({
   codexSessionId = null,
   directQaState = kind === "direct_qa" ? "open" : null,
   lastAssistantPrompt = null,
+  lastChallengePrompt = lastAssistantPrompt,
 }) {
   return {
     slackThreadTs,
@@ -23,6 +24,7 @@ export function createThreadState({
     codexSessionId,
     directQaState,
     lastAssistantPrompt,
+    lastChallengePrompt,
   };
 }
 

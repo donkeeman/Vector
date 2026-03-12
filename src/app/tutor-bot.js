@@ -33,6 +33,7 @@ export class TutorBot {
     slackClient,
     topics,
     topicSelector = pickTopicForContinuousFlow,
+    random = Math.random,
     logger = NOOP_LOGGER,
   }) {
     this.store = store;
@@ -40,8 +41,11 @@ export class TutorBot {
     this.slackClient = slackClient;
     this.topics = topics;
     this.topicSelector = topicSelector;
+    this.random = random;
     this.logger = logger;
     this.dispatchInFlight = null;
+    this.topicBag = [];
+    this.lastDispatchedTopicId = null;
   }
 
   async handleControlInput(input, now = new Date()) {
@@ -151,6 +155,9 @@ export class TutorBot {
     const topic = this.topicSelector({
       now,
       topics: this.topics,
+      random: this.random,
+      lastTopicId: this.lastDispatchedTopicId,
+      state: this,
     });
 
     if (!topic) {
@@ -163,12 +170,16 @@ export class TutorBot {
     this.logger.debug("tutor_bot.dispatch_topic_selected", {
       topicId: topic.id,
     });
+    this.lastDispatchedTopicId = topic.id;
     const question = await this.llmRunner.runTask("question", { topic });
     const message = await this.slackClient.postDirectMessage(question.text);
     const thread = createThreadState({
       slackThreadTs: message.ts,
       topicId: topic.id,
       openedAt: now,
+      lastAssistantPrompt: question.text,
+      lastChallengePrompt: question.text,
+      codexSessionId: question.codexSessionId ?? null,
     });
 
     await this.store.saveThread(thread);
@@ -189,6 +200,9 @@ export class TutorBot {
       const answer = await this.llmRunner.runTask("answer_counterquestion", {
         thread: counterThread,
         text,
+        lastAssistantPrompt: counterThread.lastAssistantPrompt ?? null,
+        lastChallengePrompt: getChallengePrompt(counterThread),
+        codexSessionId: counterThread.codexSessionId ?? null,
       });
 
       await this.slackClient.postThreadReply(threadTs, answer.text);
@@ -196,9 +210,16 @@ export class TutorBot {
       const resolvedThread = answer.resolved === false
         ? counterThread
         : resolveCounterQuestion(counterThread, now);
-      await this.store.saveThread(resolvedThread);
+      const updatedThread = setThreadPrompts(
+        mergeCodexSessionId(resolvedThread, answer.codexSessionId),
+        {
+          assistantPrompt: answer.text,
+          challengePrompt: getChallengePrompt(counterThread),
+        },
+      );
+      await this.store.saveThread(updatedThread);
       return {
-        thread: resolvedThread,
+        thread: updatedThread,
         shouldScheduleNextQuestion: false,
       };
     }
@@ -206,8 +227,12 @@ export class TutorBot {
     const evaluation = await this.llmRunner.runTask("evaluate", {
       thread,
       text,
+      lastAssistantPrompt: thread.lastAssistantPrompt ?? null,
+      lastChallengePrompt: getChallengePrompt(thread),
+      codexSessionId: thread.codexSessionId ?? null,
     });
     const normalizedEvaluation = normalizeEvaluationResult(text, evaluation);
+    const sessionBoundThread = mergeCodexSessionId(thread, normalizedEvaluation.codexSessionId);
 
     await this.store.saveAttempt({
       threadTs,
@@ -233,14 +258,25 @@ export class TutorBot {
 
     if (normalizedEvaluation.outcome === "continue") {
       const followUp = await this.llmRunner.runTask("followup", {
-        thread,
+        thread: sessionBoundThread,
         text,
         evaluation: normalizedEvaluation,
+        lastAssistantPrompt: sessionBoundThread.lastAssistantPrompt ?? null,
+        lastChallengePrompt: getChallengePrompt(sessionBoundThread),
+        codexSessionId: sessionBoundThread.codexSessionId ?? null,
       });
 
       await this.slackClient.postThreadReply(threadTs, followUp.text);
+      const continuedThread = setThreadPrompts(
+        mergeCodexSessionId(sessionBoundThread, followUp.codexSessionId),
+        {
+          assistantPrompt: followUp.text,
+          challengePrompt: followUp.challengePrompt ?? followUp.text,
+        },
+      );
+      await this.store.saveThread(continuedThread);
       return {
-        thread,
+        thread: continuedThread,
         memory: nextMemory,
         shouldScheduleNextQuestion: false,
       };
@@ -248,16 +284,32 @@ export class TutorBot {
 
     if (normalizedEvaluation.outcome === "blocked") {
       const teaching = await this.llmRunner.runTask("teach", {
-        thread,
+        thread: sessionBoundThread,
         text,
         evaluation: normalizedEvaluation,
+        lastAssistantPrompt: sessionBoundThread.lastAssistantPrompt ?? null,
+        lastChallengePrompt: getChallengePrompt(sessionBoundThread),
+        codexSessionId: sessionBoundThread.codexSessionId ?? null,
       });
 
+      const challengePrompt = normalizeChallengePrompt(
+        teaching.challengePrompt,
+        getChallengePrompt(sessionBoundThread),
+      );
       await this.slackClient.postThreadReply(threadTs, teaching.text);
-      const blockedThread = {
-        ...thread,
-        blockedOnce: true,
-      };
+      if (challengePrompt && challengePrompt !== teaching.text) {
+        await this.slackClient.postThreadReply(threadTs, challengePrompt);
+      }
+      const blockedThread = setThreadPrompts(
+        {
+          ...mergeCodexSessionId(sessionBoundThread, teaching.codexSessionId),
+          blockedOnce: true,
+        },
+        {
+          assistantPrompt: teaching.text,
+          challengePrompt,
+        },
+      );
       await this.store.saveThread(blockedThread);
       return {
         thread: blockedThread,
@@ -272,7 +324,7 @@ export class TutorBot {
       threadTs,
       masteryKind === "recovered" ? RECOVERED_MASTERY_STATUS_REPLY : CLEAN_MASTERY_STATUS_REPLY,
     );
-    const closedThread = closeThread(thread, "mastered", now);
+    const closedThread = closeThread(sessionBoundThread, "mastered", now);
     await this.store.saveThread(closedThread);
     return {
       thread: closedThread,
@@ -311,23 +363,87 @@ function mergeRationale(rationale, addition) {
   return `${rationale} ${addition}`;
 }
 
-function pickTopicForContinuousFlow({ topics }) {
+function setThreadPrompts(thread, { assistantPrompt, challengePrompt }) {
+  return {
+    ...thread,
+    lastAssistantPrompt: assistantPrompt ?? null,
+    lastChallengePrompt: challengePrompt ?? null,
+  };
+}
+
+function mergeCodexSessionId(thread, codexSessionId) {
+  if (!codexSessionId) {
+    return thread;
+  }
+
+  return {
+    ...thread,
+    codexSessionId,
+  };
+}
+
+function getChallengePrompt(thread) {
+  return thread.lastChallengePrompt ?? thread.lastAssistantPrompt ?? null;
+}
+
+function normalizeChallengePrompt(primary, fallback) {
+  const primaryText = typeof primary === "string" ? primary.trim() : "";
+  if (primaryText) {
+    return primaryText;
+  }
+
+  const fallbackText = typeof fallback === "string" ? fallback.trim() : "";
+  return fallbackText || null;
+}
+
+function pickTopicForContinuousFlow({
+  topics,
+  random = Math.random,
+  lastTopicId = null,
+  state = null,
+}) {
   if (!Array.isArray(topics) || topics.length === 0) {
     return null;
   }
 
-  const weighted = topics
-    .map((topic) => ({
-      topic,
-      effectiveWeight: Math.max(1, topic.weight),
-    }))
-    .sort((left, right) => {
-      if (right.effectiveWeight !== left.effectiveWeight) {
-        return right.effectiveWeight - left.effectiveWeight;
-      }
+  if (!state) {
+    return pickRandomTopic(topics, random);
+  }
 
-      return left.topic.id.localeCompare(right.topic.id);
-    });
+  const availableIds = new Set(topics.map((topic) => topic.id));
+  state.topicBag = Array.isArray(state.topicBag)
+    ? state.topicBag.filter((topic) => availableIds.has(topic.id))
+    : [];
 
-  return weighted[0].topic;
+  if (state.topicBag.length === 0) {
+    state.topicBag = shuffleTopics(topics, random);
+    if (
+      state.topicBag.length > 1
+      && lastTopicId
+      && state.topicBag[0].id === lastTopicId
+    ) {
+      const [first, second, ...rest] = state.topicBag;
+      state.topicBag = [second, first, ...rest];
+    }
+  }
+
+  return state.topicBag.shift() ?? null;
+}
+
+function shuffleTopics(topics, random) {
+  const shuffled = [...topics];
+
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    const current = shuffled[index];
+    shuffled[index] = shuffled[swapIndex];
+    shuffled[swapIndex] = current;
+  }
+
+  return shuffled;
+}
+
+function pickRandomTopic(topics, random) {
+  const index = Math.floor(random() * topics.length);
+  return topics[index] ?? null;
 }
