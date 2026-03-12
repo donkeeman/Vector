@@ -152,6 +152,72 @@ test("sqlite store는 blockedOnce와 lastMasteryKind를 저장하고 읽는다",
   }
 });
 
+test("sqlite store는 가장 최근 stopped study 스레드 하나를 재개 대상으로 조회한다", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "vector-store-"));
+  const databasePath = join(tempDir, "resume.sqlite");
+  const store = new SqliteStore({ databasePath });
+
+  try {
+    await store.init();
+    await store.saveThread({
+      slackThreadTs: "resume.1",
+      topicId: "event-loop",
+      kind: "study",
+      mode: "evaluation",
+      status: "stopped",
+      openedAt: new Date("2026-03-11T10:00:00.000Z"),
+      closedAt: new Date("2026-03-11T10:10:00.000Z"),
+      lastCounterQuestionAt: null,
+      lastCounterQuestionResolvedAt: null,
+      blockedOnce: false,
+      codexSessionId: null,
+      directQaState: null,
+      lastAssistantPrompt: "microtask checkpoint를 설명해봐.",
+      lastChallengePrompt: "microtask checkpoint를 설명해봐.",
+    });
+    await store.saveThread({
+      slackThreadTs: "resume.2",
+      topicId: "rendering",
+      kind: "study",
+      mode: "evaluation",
+      status: "stopped",
+      openedAt: new Date("2026-03-11T10:05:00.000Z"),
+      closedAt: new Date("2026-03-11T10:20:00.000Z"),
+      lastCounterQuestionAt: null,
+      lastCounterQuestionResolvedAt: null,
+      blockedOnce: false,
+      codexSessionId: null,
+      directQaState: null,
+      lastAssistantPrompt: "layout과 paint 차이를 설명해봐.",
+      lastChallengePrompt: "layout과 paint 차이를 설명해봐.",
+    });
+    await store.saveThread({
+      slackThreadTs: "resume.3",
+      topicId: null,
+      kind: "direct_qa",
+      mode: "direct_qa",
+      status: "stopped",
+      openedAt: new Date("2026-03-11T10:06:00.000Z"),
+      closedAt: new Date("2026-03-11T10:30:00.000Z"),
+      lastCounterQuestionAt: null,
+      lastCounterQuestionResolvedAt: null,
+      blockedOnce: false,
+      codexSessionId: null,
+      directQaState: "open",
+      lastAssistantPrompt: "RAG가 뭐야?",
+      lastChallengePrompt: "RAG가 뭐야?",
+    });
+
+    const thread = await store.getLatestStoppedStudyThread();
+
+    assert.equal(thread?.slackThreadTs, "resume.2");
+    assert.equal(thread?.kind, "study");
+    assert.equal(thread?.status, "stopped");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("sqlite store는 legacy blocked thread를 init 시 open으로 복구한다", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "vector-store-"));
   const databasePath = join(tempDir, "legacy-blocked.sqlite");
@@ -203,6 +269,41 @@ test("sqlite store는 legacy blocked thread를 init 시 open으로 복구한다"
     assert.equal(thread.status, "open");
     assert.equal(thread.closedAt, null);
     assert.equal(openThreads.some((item) => item.slackThreadTs === "legacy.blocked.1"), true);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("sqlite store는 topic catalog를 저장/조회하고 last_used_at을 갱신한다", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "vector-store-"));
+  const databasePath = join(tempDir, "topic-catalog.sqlite");
+  const store = new SqliteStore({ databasePath });
+  const now = new Date("2026-03-12T14:50:00+09:00");
+
+  try {
+    await store.init();
+    await store.saveTopic({
+      id: "memory-model",
+      title: "Memory Model",
+      category: "language-runtime",
+      promptSeed: "Explain what a memory model is and why it exists.",
+      weight: 4,
+    }, now);
+
+    const listed = await store.listTopics();
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].id, "memory-model");
+    assert.equal(listed[0].title, "Memory Model");
+    assert.equal(listed[0].category, "language-runtime");
+    assert.equal(listed[0].weight, 4);
+
+    const touchedAt = new Date("2026-03-12T15:00:00+09:00");
+    await store.touchTopic("memory-model", touchedAt);
+    const refreshed = await store.listTopics();
+    assert.equal(
+      refreshed[0].lastUsedAt?.toISOString(),
+      touchedAt.toISOString(),
+    );
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

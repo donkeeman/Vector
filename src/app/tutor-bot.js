@@ -15,6 +15,7 @@ import {
 } from "../domain/thread-policy.js";
 import {
   createEmptyTopicMemory,
+  pickNextTopic,
   updateTopicMemory,
 } from "../domain/topic-memory.js";
 
@@ -76,6 +77,17 @@ export class TutorBot {
 
     await this.store.saveSession(nextSession);
 
+    if (command === "start" && session.state === "paused" && nextSession.state === "active") {
+      await this.reopenLatestStoppedStudyThread();
+    }
+
+    if (command === "stop") {
+      const closedThreads = await this.closeOpenThreadsAsStopped(now);
+      this.logger.debug("tutor_bot.stop_closed_threads", {
+        count: closedThreads.length,
+      });
+    }
+
     if (command === "start") {
       const openThreads = await this.store.listOpenThreads();
       const hasOpenStudyThread = openThreads.some((thread) => (thread.kind ?? "study") === "study");
@@ -92,6 +104,42 @@ export class TutorBot {
     }
 
     return nextSession;
+  }
+
+  async reopenLatestStoppedStudyThread() {
+    if (typeof this.store.getLatestStoppedStudyThread !== "function") {
+      return null;
+    }
+
+    const latestStoppedStudyThread = await this.store.getLatestStoppedStudyThread();
+    if (!latestStoppedStudyThread) {
+      return null;
+    }
+
+    const reopenedThread = {
+      ...latestStoppedStudyThread,
+      status: "open",
+      closedAt: null,
+    };
+    await this.store.saveThread(reopenedThread);
+    this.logger.debug("tutor_bot.start_resumed_thread", {
+      threadTs: reopenedThread.slackThreadTs,
+      topicId: reopenedThread.topicId,
+    });
+    return reopenedThread;
+  }
+
+  async closeOpenThreadsAsStopped(now = new Date()) {
+    const openThreads = await this.store.listOpenThreads();
+    const closedThreads = [];
+
+    for (const thread of openThreads) {
+      const closedThread = closeThread(thread, "stopped", now);
+      await this.store.saveThread(closedThread);
+      closedThreads.push(closedThread);
+    }
+
+    return closedThreads;
   }
 
   async closeOpenStudyThreadsAsStale(now = new Date()) {
@@ -152,13 +200,27 @@ export class TutorBot {
       return null;
     }
 
-    const topic = this.topicSelector({
+    const memories = await this.store.getTopicMemories();
+    const catalogTopics = await this.#listCatalogTopics(now);
+    let topic = this.topicSelector({
       now,
-      topics: this.topics,
+      topics: catalogTopics,
+      memories,
       random: this.random,
       lastTopicId: this.lastDispatchedTopicId,
       state: this,
     });
+
+    if (!topic) {
+      topic = await this.#generateTopic({
+        now,
+        catalogTopics,
+      });
+
+      if (topic) {
+        await this.#saveTopicIfSupported(topic, now);
+      }
+    }
 
     if (!topic) {
       this.logger.debug("tutor_bot.dispatch_skipped", {
@@ -167,11 +229,19 @@ export class TutorBot {
       return null;
     }
 
+    if (typeof this.store.touchTopic === "function") {
+      await this.store.touchTopic(topic.id, now);
+    }
+
     this.logger.debug("tutor_bot.dispatch_topic_selected", {
       topicId: topic.id,
     });
     this.lastDispatchedTopicId = topic.id;
-    const question = await this.llmRunner.runTask("question", { topic });
+    const topicMemory = memories.get(topic.id) ?? null;
+    const question = await this.llmRunner.runTask("question", {
+      topic,
+      topicMemory,
+    });
     const message = await this.slackClient.postDirectMessage(question.text);
     const thread = createThreadState({
       slackThreadTs: message.ts,
@@ -184,6 +254,90 @@ export class TutorBot {
 
     await this.store.saveThread(thread);
     return thread;
+  }
+
+  async #listCatalogTopics(now) {
+    if (typeof this.store.listTopics !== "function") {
+      return Array.isArray(this.topics) ? [...this.topics] : [];
+    }
+
+    let catalogTopics = await this.store.listTopics();
+
+    if (catalogTopics.length === 0 && Array.isArray(this.topics) && this.topics.length > 0) {
+      for (const topic of this.topics) {
+        await this.#saveTopicIfSupported(topic, now);
+      }
+      catalogTopics = await this.store.listTopics();
+    }
+
+    return catalogTopics;
+  }
+
+  async #saveTopicIfSupported(topic, now) {
+    if (typeof this.store.saveTopic !== "function") {
+      return;
+    }
+
+    await this.store.saveTopic(topic, now);
+  }
+
+  async #generateTopic({ now, catalogTopics }) {
+    const recentTopics = await this.#loadRecentTopicHistory();
+    const existingIds = new Set(catalogTopics.map((topic) => topic.id));
+    const existingTitles = new Set(
+      catalogTopics.map((topic) => String(topic.title ?? "").trim().toLowerCase()).filter(Boolean),
+    );
+
+    const generated = await this.llmRunner.runTask("topic", {
+      now: now.toISOString(),
+      recentTopics,
+      existingTopics: catalogTopics.map((topic) => ({
+        id: topic.id,
+        title: topic.title,
+        category: topic.category,
+      })),
+    });
+
+    const rawTopic = generated?.topic ?? generated;
+    const normalized = normalizeGeneratedTopic(rawTopic);
+
+    if (!normalized) {
+      this.logger.error("tutor_bot.topic_generation_invalid", {
+        rawTopic,
+      });
+      return null;
+    }
+
+    if (existingTitles.has(normalized.title.toLowerCase())) {
+      this.logger.debug("tutor_bot.topic_generation_deduplicated", {
+        reason: "title_already_exists",
+        title: normalized.title,
+      });
+      return null;
+    }
+
+    if (!existingIds.has(normalized.id)) {
+      return normalized;
+    }
+
+    return {
+      ...normalized,
+      id: createUniqueTopicId(normalized.id, existingIds),
+    };
+  }
+
+  async #loadRecentTopicHistory(limit = 8) {
+    const threads = await this.store.listOpenThreads();
+    const recentFromOpen = threads
+      .filter((thread) => (thread.kind ?? "study") === "study" && thread.topicId)
+      .slice(-limit)
+      .map((thread) => thread.topicId);
+
+    if (recentFromOpen.length > 0) {
+      return recentFromOpen;
+    }
+
+    return this.lastDispatchedTopicId ? [this.lastDispatchedTopicId] : [];
   }
 
   async handleThreadMessage({ threadTs, text, now = new Date() }) {
@@ -397,7 +551,9 @@ function normalizeChallengePrompt(primary, fallback) {
 }
 
 function pickTopicForContinuousFlow({
+  now,
   topics,
+  memories,
   random = Math.random,
   lastTopicId = null,
   state = null,
@@ -406,17 +562,42 @@ function pickTopicForContinuousFlow({
     return null;
   }
 
-  if (!state) {
-    return pickRandomTopic(topics, random);
+  const memoryMap = memories instanceof Map ? memories : new Map();
+  const reviewCandidates = topics.filter((topic) => {
+    const memory = memoryMap.get(topic.id);
+    if (!memory) {
+      return false;
+    }
+    if (memory.nextReviewAt && memory.nextReviewAt.getTime() > now.getTime()) {
+      return false;
+    }
+    return true;
+  });
+
+  if (reviewCandidates.length > 0) {
+    return pickNextTopic({
+      now,
+      topics: reviewCandidates,
+      memories: memoryMap,
+    });
   }
 
-  const availableIds = new Set(topics.map((topic) => topic.id));
+  const newTopicCandidates = topics.filter((topic) => memoryMap.has(topic.id) === false);
+  if (newTopicCandidates.length === 0) {
+    return null;
+  }
+
+  if (!state) {
+    return pickRandomTopic(newTopicCandidates, random);
+  }
+
+  const availableIds = new Set(newTopicCandidates.map((topic) => topic.id));
   state.topicBag = Array.isArray(state.topicBag)
     ? state.topicBag.filter((topic) => availableIds.has(topic.id))
     : [];
 
   if (state.topicBag.length === 0) {
-    state.topicBag = shuffleTopics(topics, random);
+    state.topicBag = shuffleTopics(newTopicCandidates, random);
     if (
       state.topicBag.length > 1
       && lastTopicId
@@ -446,4 +627,50 @@ function shuffleTopics(topics, random) {
 function pickRandomTopic(topics, random) {
   const index = Math.floor(random() * topics.length);
   return topics[index] ?? null;
+}
+
+function normalizeGeneratedTopic(rawTopic) {
+  if (!rawTopic || typeof rawTopic !== "object") {
+    return null;
+  }
+
+  const title = String(rawTopic.title ?? "").trim();
+  const promptSeed = String(rawTopic.promptSeed ?? "").trim();
+  const category = String(rawTopic.category ?? "general").trim().toLowerCase();
+  const weightRaw = Number(rawTopic.weight ?? 3);
+  const weight = Number.isFinite(weightRaw) ? Math.min(Math.max(Math.round(weightRaw), 1), 10) : 3;
+
+  if (!title || !promptSeed) {
+    return null;
+  }
+
+  const baseId = String(rawTopic.id ?? title)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+
+  if (!baseId) {
+    return null;
+  }
+
+  return {
+    id: baseId,
+    title,
+    category: category || "general",
+    promptSeed,
+    weight,
+  };
+}
+
+function createUniqueTopicId(baseId, existingIds) {
+  let nextId = baseId;
+  let counter = 2;
+
+  while (existingIds.has(nextId)) {
+    nextId = `${baseId}-${counter}`;
+    counter += 1;
+  }
+
+  return nextId;
 }

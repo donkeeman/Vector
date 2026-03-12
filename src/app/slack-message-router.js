@@ -10,6 +10,8 @@ const DIRECT_QUESTION_FAILURE_TEXT =
   "흠, 지금은 응답이 꼬였어. 같은 스레드에 다시 던져.";
 const THREAD_FAILURE_TEXT =
   "흥, 판정이 잠깐 꼬였네. 같은 스레드에 다시 답해.";
+const STOPPED_SESSION_REPLY_TEXT =
+  "지금은 중단 상태다. 다시 붙고 싶으면 `!start`부터 쳐.";
 
 const DIRECT_QUESTION_PATTERN =
   /[?？]$|^(왜|어떻게|뭐|무엇|언제|어디|누구|what|why|how|can|is|are|do|does|did|should|would|could)\b|(?:설명|알려|말해|비교|정리|요약|차이|의미|원리|구조|뜻).*(?:해|해줘|해주세요|해봐|줘)$|(?:뭐야|뭐지|무슨 뜻이야|무슨 뜻이지|의미가 뭐야|원리가 뭐야)$/i;
@@ -99,6 +101,16 @@ export class SlackMessageRouter {
       return null;
     }
 
+    if (await this.#isPausedSession()) {
+      this.logger.debug("router.route.paused_root", {
+        channel: event.channel,
+        ts: event.ts,
+        textPreview: previewText(event.text),
+      });
+      await this.slackClient.postThreadReply(event.ts, STOPPED_SESSION_REPLY_TEXT);
+      return null;
+    }
+
     const openThreads = await this.store.listOpenThreads();
 
     if (openThreads.length > 0 && !looksLikeDirectQuestion(event.text)) {
@@ -154,9 +166,20 @@ export class SlackMessageRouter {
       return null;
     }
 
+    if (await this.#isPausedSession()) {
+      this.logger.debug("router.route.paused_thread", {
+        channel: event.channel,
+        ts: event.ts,
+        threadTs: event.thread_ts,
+        textPreview: previewText(event.text),
+      });
+      await this.slackClient.postThreadReply(event.thread_ts, STOPPED_SESSION_REPLY_TEXT);
+      return null;
+    }
+
     const thread = await this.store.getThread(event.thread_ts);
 
-    if (thread?.kind === "direct_qa") {
+    if (thread?.kind === "direct_qa" && thread?.status === "open") {
       return this.#handleDirectQaThreadReply(event, thread);
     }
 
@@ -181,6 +204,15 @@ export class SlackMessageRouter {
       await this.slackClient.postThreadReply(event.thread_ts, THREAD_FAILURE_TEXT);
       return null;
     }
+  }
+
+  async #isPausedSession() {
+    if (typeof this.store.getSession !== "function") {
+      return false;
+    }
+
+    const session = await this.store.getSession();
+    return session?.state === "paused";
   }
 
   async #handleDirectQaThreadReply(event, thread) {

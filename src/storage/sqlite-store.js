@@ -38,6 +38,16 @@ export class SqliteStore {
         mastered_streak INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS topic_catalog (
+        topic_id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        category TEXT NOT NULL,
+        prompt_seed TEXT NOT NULL,
+        weight INTEGER NOT NULL DEFAULT 3,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT
+      );
+
       CREATE TABLE IF NOT EXISTS threads (
         slack_thread_ts TEXT PRIMARY KEY,
         topic_id TEXT NOT NULL,
@@ -125,6 +135,18 @@ export class SqliteStore {
     const rows = await this.#query(
       `SELECT * FROM threads WHERE slack_thread_ts = ${toSqlString(threadTs)};`,
     );
+    return rows[0] ? mapThreadRow(rows[0]) : null;
+  }
+
+  async getLatestStoppedStudyThread() {
+    const rows = await this.#query(`
+      SELECT *
+      FROM threads
+      WHERE status = 'stopped'
+        AND kind = 'study'
+      ORDER BY closed_at DESC, opened_at DESC
+      LIMIT 1;
+    `);
     return rows[0] ? mapThreadRow(rows[0]) : null;
   }
 
@@ -216,6 +238,51 @@ export class SqliteStore {
       `SELECT * FROM topic_memory WHERE topic_id = ${toSqlString(topicId)};`,
     );
     return rows[0] ? mapMemoryRow(rows[0]) : null;
+  }
+
+  async listTopics() {
+    const rows = await this.#query("SELECT * FROM topic_catalog ORDER BY created_at ASC;");
+    return rows.map(mapTopicRow);
+  }
+
+  async saveTopic(topic, now = new Date()) {
+    const parsedWeight = Number(topic.weight ?? 3);
+    const weight = Number.isFinite(parsedWeight)
+      ? Math.max(1, Math.round(parsedWeight))
+      : 3;
+
+    await this.#execute(`
+      INSERT INTO topic_catalog (
+        topic_id,
+        title,
+        category,
+        prompt_seed,
+        weight,
+        created_at,
+        last_used_at
+      ) VALUES (
+        ${toSqlString(topic.id)},
+        ${toSqlString(topic.title)},
+        ${toSqlString(topic.category ?? "general")},
+        ${toSqlString(topic.promptSeed)},
+        ${weight},
+        ${toSqlDate(topic.createdAt ?? now)},
+        ${toSqlDate(topic.lastUsedAt ?? null)}
+      )
+      ON CONFLICT(topic_id) DO UPDATE SET
+        title = excluded.title,
+        category = excluded.category,
+        prompt_seed = excluded.prompt_seed,
+        weight = excluded.weight;
+    `);
+  }
+
+  async touchTopic(topicId, now = new Date()) {
+    await this.#execute(`
+      UPDATE topic_catalog
+      SET last_used_at = ${toSqlDate(now)}
+      WHERE topic_id = ${toSqlString(topicId)};
+    `);
   }
 
   async saveTopicMemory(topicId, memory) {
@@ -383,5 +450,17 @@ function mapMemoryRow(row) {
     lastMasteryKind: row.last_mastery_kind ?? null,
     nextReviewAt: parseNullableDate(row.next_review_at),
     masteredStreak: row.mastered_streak,
+  };
+}
+
+function mapTopicRow(row) {
+  return {
+    id: row.topic_id,
+    title: row.title,
+    category: row.category,
+    promptSeed: row.prompt_seed,
+    weight: Number(row.weight ?? 3),
+    createdAt: parseNullableDate(row.created_at),
+    lastUsedAt: parseNullableDate(row.last_used_at),
   };
 }

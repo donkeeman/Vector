@@ -125,6 +125,42 @@ test("DM 루트 !stop 명령은 세션을 멈추지만 Slack 답장은 남기지
   assert.deepEqual(router.slackClient.replies, []);
 });
 
+test("paused 상태의 DM 루트 일반 메시지는 !start 안내 고정문구로 응답한다", async () => {
+  const llmCalls = [];
+  const store = createStore();
+  store.session = {
+    state: "paused",
+  };
+  const router = new SlackMessageRouter({
+    store,
+    tutorBot: createTutorBot(),
+    llmRunner: {
+      async runTask(type, payload) {
+        llmCalls.push({ type, payload });
+        return { text: "should not happen" };
+      },
+    },
+    slackClient: createSlackClient(),
+  });
+
+  await router.handleMessageEvent({
+    type: "message",
+    channel_type: "im",
+    channel: "D123",
+    user: "U123",
+    text: "이거 왜 안 돼?",
+    ts: "1000.115",
+  });
+
+  assert.deepEqual(llmCalls, []);
+  assert.deepEqual(router.slackClient.replies, [
+    {
+      threadTs: "1000.115",
+      text: "지금은 중단 상태다. 다시 붙고 싶으면 `!start`부터 쳐.",
+    },
+  ]);
+});
+
 test("DM 루트 일반 질문은 원문 메시지 스레드에 답한다", async () => {
   const slackClient = createSlackClient();
   const llmCalls = [];
@@ -623,6 +659,49 @@ test("DM 스레드 !start/!stop도 제어 명령으로 처리한다", async () =
   assert.deepEqual(router.slackClient.replies, []);
 });
 
+test("paused 상태의 DM 스레드 일반 메시지는 !start 안내 고정문구로 응답한다", async () => {
+  const controlCalls = [];
+  const threadCalls = [];
+  const store = createStore();
+  store.session = {
+    state: "paused",
+  };
+  const router = new SlackMessageRouter({
+    store,
+    tutorBot: {
+      async applyControlCommand(command, now) {
+        controlCalls.push({ command, now });
+        return { state: "paused" };
+      },
+      async handleThreadMessage(payload) {
+        threadCalls.push(payload);
+        return null;
+      },
+    },
+    llmRunner: createUnusedLlmRunner(),
+    slackClient: createSlackClient(),
+  });
+
+  await router.handleMessageEvent({
+    type: "message",
+    channel_type: "im",
+    channel: "D123",
+    user: "U123",
+    text: "이어서 답할게",
+    ts: "1000.43",
+    thread_ts: "1000.1",
+  });
+
+  assert.deepEqual(controlCalls, []);
+  assert.deepEqual(threadCalls, []);
+  assert.deepEqual(router.slackClient.replies, [
+    {
+      threadTs: "1000.1",
+      text: "지금은 중단 상태다. 다시 붙고 싶으면 `!start`부터 쳐.",
+    },
+  ]);
+});
+
 test("direct_qa 스레드 reply는 history를 싣고 direct_thread_turn으로 이어진다", async () => {
   const calls = [];
   const slackClient = createSlackClient();
@@ -1062,8 +1141,17 @@ function createUnusedLlmRunner() {
 
 function createStore() {
   return {
+    session: {
+      state: "active",
+    },
     threads: new Map(),
     directQaMessages: new Map(),
+    async getSession() {
+      return this.session;
+    },
+    async saveSession(session) {
+      this.session = session;
+    },
     async listOpenThreads() {
       return Array.from(this.threads.values()).filter((thread) => thread.status === "open");
     },
