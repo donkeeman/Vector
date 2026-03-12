@@ -109,8 +109,10 @@ function parseTaskResult(taskType, raw) {
 }
 
 const TASK_INSTRUCTIONS = {
+  topic:
+    'Return {"topic":{"id":"kebab-case-id","title":"...","category":"...","promptSeed":"...","weight":1-10}} for a new CS/dev learning topic. Avoid duplicates with existingTopics/recentTopics. Pick broad computer-science or adjacent engineering topics (os, network, database, language runtime, distributed systems, security, tooling, testing, architecture). Do not output a question in this task; only topic metadata.',
   question:
-    'Return {"text":"..."} with exactly one concise CS question only. Never combine two asks in one turn (no multi-part asks joined by "and" equivalents). If you add rivalry taunt, keep it as a statement without a question mark. The only question mark must belong to the technical question. The tone must be provocative, playful, and openly competitive, like a genius rival testing weak points.',
+    'Return {"text":"..."} with exactly one concise CS question only. Never combine two asks in one turn (no multi-part asks joined by "and" equivalents). If payload.topicMemory is null or topicMemory.attemptCount is 0, ask a foundational concept-definition question first (for example "X가 뭐야?" level) before mechanism-heavy depth. If you add rivalry taunt, keep it as a statement without a question mark. The only question mark must belong to the technical question. The tone must be provocative, playful, and openly competitive, like a genius rival testing weak points.',
   evaluate:
     'Return {"outcome":"continue|blocked|mastered","rationale":"...","text":"optional closing reply when mastered"} based on the answer quality. Evaluate the user answer against thread.lastChallengePrompt first (fallback: thread.lastAssistantPrompt). If the latest user message contains ambiguous references such as "that/it/why that", resolve them to thread.lastChallengePrompt by default when available.',
   followup:
@@ -126,6 +128,7 @@ const TASK_INSTRUCTIONS = {
 };
 
 const TASK_EXECUTION_PROFILE = {
+  topic: { reasoningEffort: "medium" },
   question: { reasoningEffort: "medium" },
   evaluate: { reasoningEffort: "high" },
   followup: { reasoningEffort: "medium" },

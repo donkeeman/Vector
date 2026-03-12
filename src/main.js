@@ -9,7 +9,6 @@ import { SessionLifecycleManager } from "./runtime/macos/session-lifecycle-manag
 import { SessionLifecycleMonitor } from "./runtime/macos/session-lifecycle-monitor.js";
 import { StudyLoop } from "./runtime/study-loop.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
-import { DEFAULT_TOPICS } from "./topics/default-topics.js";
 
 async function main() {
   const config = loadConfig();
@@ -21,7 +20,7 @@ async function main() {
 
   const bot = new TutorBot({
     store,
-    topics: DEFAULT_TOPICS,
+    topics: [],
     llmRunner: new CodexCliRunner({
       command: config.codexCommand,
       model: config.codexModel,

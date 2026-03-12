@@ -1,12 +1,5 @@
 import { addKstDays } from "./time.js";
 
-const FRONTEND_WEIGHT_BONUS = new Map([
-  ["frontend", 10],
-  ["browser", 8],
-  ["web", 6],
-  ["network", 3],
-]);
-
 export function createEmptyTopicMemory() {
   return {
     masteryScore: 0,
@@ -87,7 +80,7 @@ export function pickNextTopic({ now, topics, memories }) {
       return {
         topic,
         bucket,
-        effectiveWeight: topic.weight + (FRONTEND_WEIGHT_BONUS.get(topic.category) ?? 0),
+        effectiveWeight: Math.max(1, topic.weight ?? 1),
       };
     })
     .filter(Boolean)
