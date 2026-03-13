@@ -1,12 +1,5 @@
 import { addKstDays } from "./time.js";
 
-const FRONTEND_WEIGHT_BONUS = new Map([
-  ["frontend", 10],
-  ["browser", 8],
-  ["web", 6],
-  ["network", 3],
-]);
-
 export function createEmptyTopicMemory() {
   return {
     masteryScore: 0,
@@ -14,39 +7,46 @@ export function createEmptyTopicMemory() {
     successCount: 0,
     failureCount: 0,
     lastOutcome: null,
+    lastMasteryKind: null,
     nextReviewAt: null,
     masteredStreak: 0,
   };
 }
 
-export function scheduleReview(memory, outcome, now) {
+export function scheduleReview(memory, outcome, now, options = {}) {
   if (outcome === "blocked") {
     return addKstDays(now, 1);
   }
 
   if (outcome === "mastered") {
+    const masteryKind = options.masteryKind ?? "clean";
     const nextStreak = memory.lastOutcome === "mastered"
       ? memory.masteredStreak + 1
       : 1;
-    const days = Math.min(7 * 2 ** (nextStreak - 1), 30);
+    const cleanDays = masteryDaysForStreak(nextStreak);
+    const days = masteryKind === "recovered"
+      ? recoveredMasteryDaysForStreak(nextStreak)
+      : cleanDays;
     return addKstDays(now, days);
   }
 
   return now;
 }
 
-export function updateTopicMemory(memory, outcome, now) {
+export function updateTopicMemory(memory, outcome, now, options = {}) {
   const current = memory ?? createEmptyTopicMemory();
+  const masteryKind = options.masteryKind ?? "clean";
   const next = {
     ...current,
     attemptCount: current.attemptCount + 1,
     lastOutcome: outcome,
-    nextReviewAt: scheduleReview(current, outcome, now),
+    nextReviewAt: scheduleReview(current, outcome, now, { masteryKind }),
   };
 
   if (outcome === "mastered") {
     next.masteryScore = clamp(current.masteryScore + 0.35, 0, 1);
     next.successCount = current.successCount + 1;
+    next.lastMasteryKind = masteryKind;
     next.masteredStreak = current.lastOutcome === "mastered"
       ? current.masteredStreak + 1
       : 1;
@@ -57,11 +57,13 @@ export function updateTopicMemory(memory, outcome, now) {
     next.masteryScore = clamp(current.masteryScore - 0.3, 0, 1);
     next.failureCount = current.failureCount + 1;
     next.masteredStreak = 0;
+    next.lastMasteryKind = null;
     return next;
   }
 
   next.masteryScore = clamp(current.masteryScore + 0.05, 0, 1);
   next.masteredStreak = 0;
+  next.lastMasteryKind = null;
   return next;
 }
 
@@ -78,7 +80,7 @@ export function pickNextTopic({ now, topics, memories }) {
       return {
         topic,
         bucket,
-        effectiveWeight: topic.weight + (FRONTEND_WEIGHT_BONUS.get(topic.category) ?? 0),
+        effectiveWeight: Math.max(1, topic.weight ?? 1),
       };
     })
     .filter(Boolean)
@@ -127,4 +129,16 @@ function isWeak(memory) {
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
+}
+
+function masteryDaysForStreak(streak) {
+  return Math.min(7 * 2 ** (streak - 1), 30);
+}
+
+function recoveredMasteryDaysForStreak(streak) {
+  if (streak <= 1) {
+    return 3;
+  }
+
+  return masteryDaysForStreak(streak - 1);
 }

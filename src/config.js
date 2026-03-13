@@ -15,6 +15,9 @@ export function loadConfig(env = process.env) {
     codexCommand: mergedEnv.CODEX_COMMAND ?? "codex",
     codexModel: mergedEnv.CODEX_MODEL ?? null,
     databasePath: resolve(mergedEnv.DATABASE_PATH ?? "./data/vector.sqlite"),
+    debugEnabled: mergedEnv.VECTOR_DEBUG === "1",
+    autoStartEnabled: mergedEnv.VECTOR_AUTO_START !== "0",
+    macosLifecycleEnabled: mergedEnv.VECTOR_MACOS_LIFECYCLE !== "0",
   };
 }
 
