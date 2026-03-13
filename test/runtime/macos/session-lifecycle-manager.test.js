@@ -8,13 +8,9 @@ test("lifecycle manager는 launch와 wake/unlock 이벤트를 start로, sleep/lo
   const hooks = [];
   const manager = new SessionLifecycleManager({
     tutorBot: {
-      async closeOpenStudyThreadsAsStale(now) {
-        calls.push({ command: "cleanup", now });
-        return [];
-      },
       async applyControlCommand(command, now) {
         calls.push({ command, now });
-        return { state: command === "start" ? "active" : "paused" };
+        return { state: command === "start" ? "active" : "inactive" };
       },
     },
     now: () => new Date("2026-03-11T18:00:00+09:00"),
@@ -30,11 +26,8 @@ test("lifecycle manager는 launch와 wake/unlock 이벤트를 start로, sleep/lo
   await manager.handleEvent("screen_locked");
 
   assert.deepEqual(calls.map(({ command }) => command), [
-    "cleanup",
     "start",
-    "cleanup",
     "start",
-    "cleanup",
     "start",
     "stop",
     "stop",

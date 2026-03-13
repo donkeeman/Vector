@@ -66,16 +66,12 @@ export class TutorBot {
     return this.sessionController.applyControlCommand(command, now);
   }
 
-  async reopenLatestStoppedStudyThread() {
-    return this.sessionController.reopenLatestStoppedStudyThread();
+  async reopenLatestIncompleteStudyThread() {
+    return this.sessionController.reopenLatestIncompleteStudyThread();
   }
 
-  async closeOpenThreadsAsStopped(now = new Date()) {
-    return this.sessionController.closeOpenThreadsAsStopped(now);
-  }
-
-  async closeOpenStudyThreadsAsStale(now = new Date()) {
-    return this.sessionController.closeOpenStudyThreadsAsStale(now);
+  async closeOpenStudyThreadsAsStopped(now = new Date()) {
+    return this.sessionController.closeOpenStudyThreadsAsStopped(now);
   }
 
   async dispatchNextQuestion(now = new Date()) {

@@ -5,7 +5,7 @@ import { TutorBot } from "../../src/app/tutor-bot.js";
 import {
   createInactiveSession,
   createStartedSession,
-  pauseSession,
+  deactivateSession,
 } from "../../src/domain/session-policy.js";
 import { createThreadState } from "../../src/domain/thread-policy.js";
 
@@ -27,30 +27,11 @@ test("!start는 inactive 세션을 새로 시작한다", async () => {
   assert.deepEqual(store.session, nextSession);
 });
 
-test("!start는 paused 세션을 재개한다", async () => {
+test("!start는 inactive 세션의 최근 stopped study 스레드 하나만 다시 열고 재개 알림을 남긴다", async () => {
   const store = createInMemoryStore();
   const startedAt = new Date("2026-03-11T09:05:00+09:00");
-  const pausedAt = new Date("2026-03-11T10:00:00+09:00");
-  store.session = pauseSession(createStartedSession(startedAt), pausedAt);
-  const bot = new TutorBot({
-    store,
-    topics: [],
-    llmRunner: createUnusedLlmRunner(),
-    slackClient: createUnusedSlackClient(),
-  });
-
-  const nextSession = await bot.handleControlInput("!start", new Date("2026-03-11T10:10:00+09:00"));
-
-  assert.equal(nextSession.state, "active");
-  assert.deepEqual(nextSession.startedAt, startedAt);
-  assert.equal(nextSession.pausedAt, null);
-});
-
-test("paused에서 !start는 가장 최근 stopped study 스레드 하나만 다시 연다", async () => {
-  const store = createInMemoryStore();
-  const startedAt = new Date("2026-03-11T09:05:00+09:00");
-  const pausedAt = new Date("2026-03-11T10:00:00+09:00");
-  store.session = pauseSession(createStartedSession(startedAt), pausedAt);
+  const stoppedAt = new Date("2026-03-11T10:00:00+09:00");
+  store.session = deactivateSession(createStartedSession(startedAt), stoppedAt);
   store.threads.set(
     "111.210",
     {
@@ -89,11 +70,20 @@ test("paused에서 !start는 가장 최근 stopped study 스레드 하나만 다
     },
   );
 
+  const replies = [];
   const bot = new TutorBot({
     store,
     topics: [],
     llmRunner: createUnusedLlmRunner(),
-    slackClient: createUnusedSlackClient(),
+    slackClient: {
+      async postDirectMessage() {
+        throw new Error("should not be called");
+      },
+      async postThreadReply(threadTs, text) {
+        replies.push({ threadTs, text });
+        return { ok: true };
+      },
+    },
   });
 
   const nextSession = await bot.handleControlInput("!start", new Date("2026-03-11T10:10:00+09:00"));
@@ -103,6 +93,9 @@ test("paused에서 !start는 가장 최근 stopped study 스레드 하나만 다
   assert.equal(store.threads.get("111.211")?.closedAt, null);
   assert.equal(store.threads.get("111.210")?.status, "stopped");
   assert.equal(store.threads.get("111.212")?.status, "stopped");
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].threadTs, "111.211");
+  assert.match(replies[0].text, /이어가/u);
 });
 
 test("!start는 이미 active 세션이면 상태를 다시 만들지 않는다", async () => {
@@ -123,7 +116,7 @@ test("!start는 이미 active 세션이면 상태를 다시 만들지 않는다"
   assert.deepEqual(store.session, nextSession);
 });
 
-test("!stop는 active 세션을 멈추고 inactive 세션은 그대로 둔다", async () => {
+test("!stop는 active 세션을 inactive로 바꾸고 inactive 세션은 그대로 둔다", async () => {
   const activeStore = createInMemoryStore();
   activeStore.session = createStartedSession(new Date("2026-03-11T09:05:00+09:00"));
   const inactiveStore = createInMemoryStore();
@@ -142,15 +135,14 @@ test("!stop는 active 세션을 멈추고 inactive 세션은 그대로 둔다", 
   });
   const stoppedAt = new Date("2026-03-11T10:00:00+09:00");
 
-  const pausedSession = await activeBot.handleControlInput("!stop", stoppedAt);
+  const inactiveSession = await activeBot.handleControlInput("!stop", stoppedAt);
   const unchangedSession = await inactiveBot.handleControlInput("!stop", stoppedAt);
 
-  assert.equal(pausedSession.state, "paused");
-  assert.deepEqual(pausedSession.pausedAt, stoppedAt);
+  assert.equal(inactiveSession.state, "inactive");
   assert.equal(unchangedSession.state, "inactive");
 });
 
-test("!stop는 열린 study/direct_qa 스레드를 모두 stopped로 닫는다", async () => {
+test("!stop는 열린 study만 stopped로 닫고 direct_qa는 열린 상태로 둔다", async () => {
   const store = createInMemoryStore();
   store.session = createStartedSession(new Date("2026-03-11T09:05:00+09:00"));
   store.threads.set(
@@ -181,102 +173,11 @@ test("!stop는 열린 study/direct_qa 스레드를 모두 stopped로 닫는다",
 
   const session = await bot.handleControlInput("!stop", stoppedAt);
 
-  assert.equal(session.state, "paused");
+  assert.equal(session.state, "inactive");
   assert.equal(store.threads.get("111.300")?.status, "stopped");
-  assert.equal(store.threads.get("111.301")?.status, "stopped");
+  assert.equal(store.threads.get("111.301")?.status, "open");
   assert.deepEqual(store.threads.get("111.300")?.closedAt, stoppedAt);
-  assert.deepEqual(store.threads.get("111.301")?.closedAt, stoppedAt);
-});
-
-test("lifecycle stale cleanup은 열린 study 스레드만 stale로 닫고 direct_qa는 유지한다", async () => {
-  const store = createInMemoryStore();
-  store.threads.set(
-    "111.100",
-    createThreadState({
-      slackThreadTs: "111.100",
-      topicId: "rendering",
-      openedAt: new Date("2026-03-11T09:00:00+09:00"),
-    }),
-  );
-  store.threads.set(
-    "111.101",
-    createThreadState({
-      slackThreadTs: "111.101",
-      topicId: null,
-      kind: "direct_qa",
-      openedAt: new Date("2026-03-11T09:01:00+09:00"),
-    }),
-  );
-  const replies = [];
-  const bot = new TutorBot({
-    store,
-    topics: [],
-    llmRunner: createUnusedLlmRunner(),
-    slackClient: {
-      async postDirectMessage() {
-        throw new Error("should not be called");
-      },
-      async postThreadReply(threadTs, text) {
-        replies.push({ threadTs, text });
-        return { ok: true };
-      },
-    },
-  });
-  const now = new Date("2026-03-11T10:00:00+09:00");
-
-  const closedThreads = await bot.closeOpenStudyThreadsAsStale(now);
-
-  assert.deepEqual(closedThreads.map((thread) => ({
-    slackThreadTs: thread.slackThreadTs,
-    status: thread.status,
-    closedAt: thread.closedAt,
-  })), [
-    {
-      slackThreadTs: "111.100",
-      status: "stale",
-      closedAt: now,
-    },
-  ]);
-  assert.equal(store.threads.get("111.100")?.status, "stale");
-  assert.equal(store.threads.get("111.101")?.status, "open");
-  assert.deepEqual(replies, [
-    {
-      threadTs: "111.100",
-      text: "테스트 재시작한다며? 이전 기록은 전부 쓰레기통에 버렸어. 깔끔하게 새 흐름에서 다시 붙어보자고. 이번엔 아까처럼 운 좋게 넘어갈 생각 마.",
-    },
-  ]);
-});
-
-test("stale 안내 답글이 실패해도 lifecycle cleanup은 스레드를 stale로 닫는다", async () => {
-  const store = createInMemoryStore();
-  store.threads.set(
-    "111.102",
-    createThreadState({
-      slackThreadTs: "111.102",
-      topicId: "rendering",
-      openedAt: new Date("2026-03-11T09:00:00+09:00"),
-    }),
-  );
-  const bot = new TutorBot({
-    store,
-    topics: [],
-    llmRunner: createUnusedLlmRunner(),
-    slackClient: {
-      async postDirectMessage() {
-        throw new Error("should not be called");
-      },
-      async postThreadReply() {
-        throw new Error("temporary slack failure");
-      },
-    },
-  });
-  const now = new Date("2026-03-11T10:00:00+09:00");
-
-  const closedThreads = await bot.closeOpenStudyThreadsAsStale(now);
-
-  assert.equal(closedThreads.length, 1);
-  assert.equal(closedThreads[0].status, "stale");
-  assert.equal(store.threads.get("111.102")?.status, "stale");
+  assert.equal(store.threads.get("111.301")?.closedAt, null);
 });
 
 test("active 세션이면 우선순위가 가장 높은 주제로 자동 질문을 보낸다", async () => {
@@ -1316,12 +1217,18 @@ function createInMemoryStore() {
     async getThread(threadTs) {
       return this.threads.get(threadTs) ?? null;
     },
-    async getLatestStoppedStudyThread() {
+    async getLatestIncompleteStudyThread() {
       const candidates = Array.from(this.threads.values())
-        .filter((thread) => (thread.kind ?? "study") === "study" && thread.status === "stopped")
+        .filter((thread) => {
+          if ((thread.kind ?? "study") !== "study") {
+            return false;
+          }
+
+          return thread.status === "open" || thread.status === "stopped";
+        })
         .sort((left, right) => {
-          const leftClosed = left.closedAt ? left.closedAt.getTime() : 0;
-          const rightClosed = right.closedAt ? right.closedAt.getTime() : 0;
+          const leftClosed = (left.closedAt ?? left.openedAt).getTime();
+          const rightClosed = (right.closedAt ?? right.openedAt).getTime();
 
           if (leftClosed !== rightClosed) {
             return rightClosed - leftClosed;

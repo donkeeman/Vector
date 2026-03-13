@@ -152,7 +152,7 @@ test("sqlite store는 blockedOnce와 lastMasteryKind를 저장하고 읽는다",
   }
 });
 
-test("sqlite store는 가장 최근 stopped study 스레드 하나를 재개 대상으로 조회한다", async () => {
+test("sqlite store는 가장 최근 incomplete study 스레드 하나를 재개 대상으로 조회한다", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "vector-store-"));
   const databasePath = join(tempDir, "resume.sqlite");
   const store = new SqliteStore({ databasePath });
@@ -193,6 +193,22 @@ test("sqlite store는 가장 최근 stopped study 스레드 하나를 재개 대
     });
     await store.saveThread({
       slackThreadTs: "resume.3",
+      topicId: "cache",
+      kind: "study",
+      mode: "evaluation",
+      status: "open",
+      openedAt: new Date("2026-03-11T10:25:00.000Z"),
+      closedAt: null,
+      lastCounterQuestionAt: null,
+      lastCounterQuestionResolvedAt: null,
+      blockedOnce: false,
+      codexSessionId: null,
+      directQaState: null,
+      lastAssistantPrompt: "ETag와 Last-Modified 차이를 설명해봐.",
+      lastChallengePrompt: "ETag와 Last-Modified 차이를 설명해봐.",
+    });
+    await store.saveThread({
+      slackThreadTs: "resume.4",
       topicId: null,
       kind: "direct_qa",
       mode: "direct_qa",
@@ -208,67 +224,11 @@ test("sqlite store는 가장 최근 stopped study 스레드 하나를 재개 대
       lastChallengePrompt: "RAG가 뭐야?",
     });
 
-    const thread = await store.getLatestStoppedStudyThread();
+    const thread = await store.getLatestIncompleteStudyThread();
 
-    assert.equal(thread?.slackThreadTs, "resume.2");
+    assert.equal(thread?.slackThreadTs, "resume.3");
     assert.equal(thread?.kind, "study");
-    assert.equal(thread?.status, "stopped");
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("sqlite store는 legacy blocked thread를 init 시 open으로 복구한다", async () => {
-  const tempDir = await mkdtemp(join(tmpdir(), "vector-store-"));
-  const databasePath = join(tempDir, "legacy-blocked.sqlite");
-  const store = new SqliteStore({ databasePath });
-
-  try {
-    await execFileAsync("sqlite3", [databasePath, `
-      CREATE TABLE threads (
-        slack_thread_ts TEXT PRIMARY KEY,
-        topic_id TEXT NOT NULL,
-        status TEXT NOT NULL,
-        mode TEXT NOT NULL,
-        opened_at TEXT NOT NULL,
-        closed_at TEXT,
-        last_counter_question_at TEXT,
-        last_counter_question_resolved_at TEXT
-      );
-      CREATE TABLE topic_memory (
-        topic_id TEXT PRIMARY KEY,
-        mastery_score REAL NOT NULL,
-        attempt_count INTEGER NOT NULL,
-        success_count INTEGER NOT NULL,
-        failure_count INTEGER NOT NULL,
-        last_outcome TEXT,
-        next_review_at TEXT,
-        mastered_streak INTEGER NOT NULL
-      );
-      INSERT INTO threads (
-        slack_thread_ts,
-        topic_id,
-        status,
-        mode,
-        opened_at,
-        closed_at
-      ) VALUES (
-        'legacy.blocked.1',
-        'event-loop',
-        'blocked',
-        'evaluation',
-        '2026-03-11T10:00:00.000Z',
-        '2026-03-11T10:02:00.000Z'
-      );
-    `]);
-
-    await store.init();
-    const thread = await store.getThread("legacy.blocked.1");
-    const openThreads = await store.listOpenThreads();
-
-    assert.equal(thread.status, "open");
-    assert.equal(thread.closedAt, null);
-    assert.equal(openThreads.some((item) => item.slackThreadTs === "legacy.blocked.1"), true);
+    assert.equal(thread?.status, "open");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

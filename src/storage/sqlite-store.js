@@ -21,8 +21,6 @@ export class SqliteStore {
         id INTEGER PRIMARY KEY CHECK (id = 1),
         state TEXT NOT NULL,
         started_at TEXT,
-        paused_at TEXT,
-        ended_at TEXT,
         expires_at TEXT
       );
 
@@ -86,11 +84,14 @@ export class SqliteStore {
 
     await this.#ensureThreadColumns();
     await this.#ensureTopicMemoryColumns();
-    await this.#reopenLegacyBlockedThreads();
   }
 
   async getSession() {
-    const rows = await this.#query("SELECT * FROM session_state WHERE id = 1;");
+    const rows = await this.#query(`
+      SELECT state, started_at, expires_at
+      FROM session_state
+      WHERE id = 1;
+    `);
     const row = rows[0];
 
     if (!row) {
@@ -100,28 +101,22 @@ export class SqliteStore {
     return {
       state: row.state,
       startedAt: parseNullableDate(row.started_at),
-      pausedAt: parseNullableDate(row.paused_at),
-      endedAt: parseNullableDate(row.ended_at),
       expiresAt: parseNullableDate(row.expires_at),
     };
   }
 
   async saveSession(session) {
     await this.#execute(`
-      INSERT INTO session_state (id, state, started_at, paused_at, ended_at, expires_at)
+      INSERT INTO session_state (id, state, started_at, expires_at)
       VALUES (
         1,
         ${toSqlString(session.state)},
         ${toSqlDate(session.startedAt)},
-        ${toSqlDate(session.pausedAt)},
-        ${toSqlDate(session.endedAt)},
         ${toSqlDate(session.expiresAt)}
       )
       ON CONFLICT(id) DO UPDATE SET
         state = excluded.state,
         started_at = excluded.started_at,
-        paused_at = excluded.paused_at,
-        ended_at = excluded.ended_at,
         expires_at = excluded.expires_at;
     `);
   }
@@ -138,20 +133,20 @@ export class SqliteStore {
     return rows[0] ? mapThreadRow(rows[0]) : null;
   }
 
-  async getLatestStoppedStudyThread() {
+  async getLatestIncompleteStudyThread() {
     const rows = await this.#query(`
       SELECT *
       FROM threads
-      WHERE status = 'stopped'
+      WHERE status IN ('open', 'stopped')
         AND kind = 'study'
-      ORDER BY closed_at DESC, opened_at DESC
+      ORDER BY COALESCE(closed_at, opened_at) DESC, opened_at DESC
       LIMIT 1;
     `);
     return rows[0] ? mapThreadRow(rows[0]) : null;
   }
 
   async saveThread(thread) {
-    const normalizedStatus = normalizeThreadStatus(thread.status);
+    const normalizedStatus = normalizeThreadStatusForPersistence(thread.status);
     const normalizedClosedAt = normalizedStatus === "open" ? null : thread.closedAt;
 
     await this.#execute(`
@@ -376,17 +371,6 @@ export class SqliteStore {
     await this.#ensureColumn("topic_memory", columns, "last_mastery_kind", "TEXT");
   }
 
-  async #reopenLegacyBlockedThreads() {
-    // 과거 버전에서 종료 상태로 기록된 blocked 스레드를 현재 정책(open 유지)으로 복구합니다.
-    await this.#execute(`
-      UPDATE threads
-      SET
-        status = 'open',
-        closed_at = NULL
-      WHERE status = 'blocked';
-    `);
-  }
-
   async #ensureColumn(tableName, columns, name, definition) {
     const hasColumn = columns.some((column) => column.name === name);
 
@@ -417,13 +401,13 @@ function toSqlInteger(value) {
 }
 
 function mapThreadRow(row) {
-  const normalizedStatus = normalizeThreadStatus(row.status);
+  const status = row.status;
 
   return {
     slackThreadTs: row.slack_thread_ts,
     topicId: fromStoredTopicId(row.topic_id),
     kind: row.kind ?? "study",
-    status: normalizedStatus,
+    status,
     mode: row.mode,
     codexSessionId: row.codex_session_id ?? null,
     directQaState: row.direct_qa_state ?? null,
@@ -431,13 +415,13 @@ function mapThreadRow(row) {
     lastChallengePrompt: row.last_challenge_prompt ?? null,
     blockedOnce: Number(row.blocked_once ?? 0) === 1,
     openedAt: new Date(row.opened_at),
-    closedAt: normalizedStatus === "open" ? null : parseNullableDate(row.closed_at),
+    closedAt: status === "open" ? null : parseNullableDate(row.closed_at),
     lastCounterQuestionAt: parseNullableDate(row.last_counter_question_at),
     lastCounterQuestionResolvedAt: parseNullableDate(row.last_counter_question_resolved_at),
   };
 }
 
-function normalizeThreadStatus(status) {
+function normalizeThreadStatusForPersistence(status) {
   // blocked는 "막힌 학습 상태"일 뿐 닫힌 스레드 상태가 아니므로 저장 단계에서 open으로 고정합니다.
   if (status === "blocked") {
     return "open";

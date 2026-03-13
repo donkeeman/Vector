@@ -1,12 +1,11 @@
 import {
   createInactiveSession,
   createStartedSession,
-  pauseSession,
-  resumeSession,
+  deactivateSession,
 } from "../domain/session-policy.js";
 import { closeThread } from "../domain/thread-policy.js";
 
-const STALE_THREAD_STATUS_REPLY = "테스트 재시작한다며? 이전 기록은 전부 쓰레기통에 버렸어. 깔끔하게 새 흐름에서 다시 붙어보자고. 이번엔 아까처럼 운 좋게 넘어갈 생각 마.";
+const RESUME_THREAD_REPLY = "도망은 거기까지지. 아까 막히던 데서 그대로 이어가자.";
 const NOOP_LOGGER = {
   debug() {},
   error() {},
@@ -23,31 +22,31 @@ export function createTutorSessionController({
     let nextSession = session;
 
     if (command === "start") {
-      if (session.state === "paused") {
-        nextSession = resumeSession(session);
-      } else if (session.state === "inactive") {
+      if (session.state === "inactive") {
         nextSession = createStartedSession(now);
       }
     } else if (command === "stop") {
       nextSession = session.state === "active"
-        ? pauseSession(session, now)
+        ? deactivateSession(session, now)
         : session;
     }
 
     await store.saveSession(nextSession);
 
-    if (command === "start" && session.state === "paused" && nextSession.state === "active") {
-      await reopenLatestStoppedStudyThread();
-    }
-
     if (command === "stop") {
-      const closedThreads = await closeOpenThreadsAsStopped(now);
+      const closedThreads = await closeOpenStudyThreadsAsStopped(now);
       logger.debug("tutor_bot.stop_closed_threads", {
         count: closedThreads.length,
       });
     }
 
     if (command === "start") {
+      const resumedThread = await reopenLatestIncompleteStudyThread();
+
+      if (resumedThread) {
+        return nextSession;
+      }
+
       const openThreads = await store.listOpenThreads();
       const hasOpenStudyThread = openThreads.some((thread) => (thread.kind ?? "study") === "study");
 
@@ -65,22 +64,23 @@ export function createTutorSessionController({
     return nextSession;
   }
 
-  async function reopenLatestStoppedStudyThread() {
-    if (typeof store.getLatestStoppedStudyThread !== "function") {
+  async function reopenLatestIncompleteStudyThread() {
+    if (typeof store.getLatestIncompleteStudyThread !== "function") {
       return null;
     }
 
-    const latestStoppedStudyThread = await store.getLatestStoppedStudyThread();
-    if (!latestStoppedStudyThread) {
+    const latestIncompleteStudyThread = await store.getLatestIncompleteStudyThread();
+    if (!latestIncompleteStudyThread) {
       return null;
     }
 
     const reopenedThread = {
-      ...latestStoppedStudyThread,
+      ...latestIncompleteStudyThread,
       status: "open",
       closedAt: null,
     };
     await store.saveThread(reopenedThread);
+    await slackClient.postThreadReply(reopenedThread.slackThreadTs, RESUME_THREAD_REPLY);
     logger.debug("tutor_bot.start_resumed_thread", {
       threadTs: reopenedThread.slackThreadTs,
       topicId: reopenedThread.topicId,
@@ -88,34 +88,13 @@ export function createTutorSessionController({
     return reopenedThread;
   }
 
-  async function closeOpenThreadsAsStopped(now = new Date()) {
-    const openThreads = await store.listOpenThreads();
-    const closedThreads = [];
-
-    for (const thread of openThreads) {
-      const closedThread = closeThread(thread, "stopped", now);
-      await store.saveThread(closedThread);
-      closedThreads.push(closedThread);
-    }
-
-    return closedThreads;
-  }
-
-  async function closeOpenStudyThreadsAsStale(now = new Date()) {
+  async function closeOpenStudyThreadsAsStopped(now = new Date()) {
     const openThreads = await store.listOpenThreads();
     const openStudyThreads = openThreads.filter((thread) => (thread.kind ?? "study") === "study");
     const closedThreads = [];
 
     for (const thread of openStudyThreads) {
-      try {
-        await slackClient.postThreadReply(thread.slackThreadTs, STALE_THREAD_STATUS_REPLY);
-      } catch (error) {
-        logger.error("tutor_bot.stale_notice_failed", {
-          threadTs: thread.slackThreadTs,
-          message: error?.message ?? String(error),
-        });
-      }
-      const closedThread = closeThread(thread, "stale", now);
+      const closedThread = closeThread(thread, "stopped", now);
       await store.saveThread(closedThread);
       closedThreads.push(closedThread);
     }
@@ -125,8 +104,7 @@ export function createTutorSessionController({
 
   return {
     applyControlCommand,
-    reopenLatestStoppedStudyThread,
-    closeOpenThreadsAsStopped,
-    closeOpenStudyThreadsAsStale,
+    reopenLatestIncompleteStudyThread,
+    closeOpenStudyThreadsAsStopped,
   };
 }
