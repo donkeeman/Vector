@@ -5,11 +5,11 @@ import { createThreadState } from "../domain/thread-policy.js";
 import { previewText } from "../debug/debug-logger.js";
 
 const ROOT_REPLY_REDIRECT_TEXT =
-  "뜬금없이 무슨 소리야? 그 답변은 네가 열어둔 스레드에 달아. 거기서 끝까지 보자고.";
+  "너 스레드가 뭔지 몰라? 엉뚱한 데다 혼잣말하지 말고, 원래 대화하던 스레드에 가서 제대로 대답해. 기본적인 툴 사용법까지 내가 하나하나 가르쳐줘야 돼? 귀찮게 진짜.";
 const DIRECT_QUESTION_FAILURE_TEXT =
-  "흠, 지금은 응답이 꼬였어. 같은 스레드에 다시 던져.";
+  "...아, 시스템 상태가 왜 이래. 네 조잡한 질문 수준에 내 뇌가 굳이 대답할 가치를 못 느꼈나 본데. 나중에 다시 물어봐. 지금은 굳이 처리해주기 귀찮으니까.";
 const THREAD_FAILURE_TEXT =
-  "흥, 판정이 잠깐 꼬였네. 같은 스레드에 다시 답해.";
+  "...아, 시스템 상태가 왜 이래. 네 조잡한 질문 수준에 내 뇌가 굳이 대답할 가치를 못 느꼈나 본데. 나중에 다시 물어봐. 지금은 굳이 처리해주기 귀찮으니까.";
 
 const DIRECT_QUESTION_PATTERN =
   /[?？]$|^(왜|어떻게|뭐|무엇|언제|어디|누구|what|why|how|can|is|are|do|does|did|should|would|could)\b|(?:설명|알려|말해|비교|정리|요약|차이|의미|원리|구조|뜻).*(?:해|해줘|해주세요|해봐|줘)$|(?:뭐야|뭐지|무슨 뜻이야|무슨 뜻이지|의미가 뭐야|원리가 뭐야)$/i;

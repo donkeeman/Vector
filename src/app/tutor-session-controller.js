@@ -5,7 +5,7 @@ import {
 } from "../domain/session-policy.js";
 import { closeThread } from "../domain/thread-policy.js";
 
-const RESUME_THREAD_REPLY = "도망은 거기까지지. 아까 막히던 데서 그대로 이어가자.";
+const RESUME_THREAD_REPLY = "머리가 어떻게 된 거 아냐? 아직 끝내지도 못한 스레드가 버젓이 남아있잖아. 하던 거나 마저 끝내고 와. 모른다고 적당히 뭉개고 새 질문으로 도망칠 생각은 꿈도 꾸지 마.";
 const NOOP_LOGGER = {
   debug() {},
   error() {},
