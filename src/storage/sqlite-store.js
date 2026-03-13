@@ -171,6 +171,18 @@ export class SqliteStore {
     return rows[0] ? mapThreadRow(rows[0]) : null;
   }
 
+  async getLatestIncompleteStudyThreadWithReplyState() {
+    const thread = await this.getLatestIncompleteStudyThread();
+    if (!thread) {
+      return null;
+    }
+
+    return {
+      thread,
+      hasUserReply: Boolean(thread.lastUserReplyAt),
+    };
+  }
+
   async saveThread(thread) {
     const normalizedStatus = normalizeThreadStatusForPersistence(thread.status);
     const normalizedClosedAt = normalizedStatus === "open" ? null : thread.closedAt;

@@ -6,6 +6,7 @@ import {
 import { closeThread } from "../domain/thread-policy.js";
 
 const RESUME_THREAD_REPLY = "머리가 어떻게 된 거 아냐? 아직 끝내지도 못한 스레드가 버젓이 남아있잖아. 하던 거나 마저 끝내고 와. 모른다고 적당히 뭉개고 새 질문으로 도망칠 생각은 꿈도 꾸지 마.";
+const AWAITING_FIRST_REPLY_THREAD_REPLY = "야, 아직 내 마지막 질문에 답도 안 했잖아. 새로 시작 버튼 누른다고 기록이 리셋되는 줄 알았어? 딴소리하지 말고 그 스레드에서 지금 바로 답해.";
 const NOOP_LOGGER = {
   debug() {},
   error() {},
@@ -69,9 +70,32 @@ export function createTutorSessionController({
       return null;
     }
 
-    const latestIncompleteStudyThread = await store.getLatestIncompleteStudyThread();
+    let latestIncompleteStudyThread = null;
+    let hasUserReply = false;
+    if (typeof store.getLatestIncompleteStudyThreadWithReplyState === "function") {
+      const latest = await store.getLatestIncompleteStudyThreadWithReplyState();
+      latestIncompleteStudyThread = latest?.thread ?? null;
+      hasUserReply = latest?.hasUserReply ?? false;
+    } else {
+      latestIncompleteStudyThread = await store.getLatestIncompleteStudyThread();
+      hasUserReply = Boolean(latestIncompleteStudyThread?.lastUserReplyAt);
+    }
+
     if (!latestIncompleteStudyThread) {
       return null;
+    }
+
+    if (latestIncompleteStudyThread.status === "open" && !hasUserReply) {
+      await slackClient.postThreadReply(
+        latestIncompleteStudyThread.slackThreadTs,
+        AWAITING_FIRST_REPLY_THREAD_REPLY,
+      );
+      logger.debug("tutor_bot.start_resumed_thread", {
+        threadTs: latestIncompleteStudyThread.slackThreadTs,
+        topicId: latestIncompleteStudyThread.topicId,
+        reason: "awaiting_first_reply",
+      });
+      return latestIncompleteStudyThread;
     }
 
     const reopenedThread = {

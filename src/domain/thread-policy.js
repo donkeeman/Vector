@@ -9,6 +9,9 @@ export function createThreadState({
   directQaState = kind === "direct_qa" ? "open" : null,
   lastAssistantPrompt = null,
   lastChallengePrompt = lastAssistantPrompt,
+  awaitingUserReplyAt = kind === "study" ? openedAt : null,
+  lastUserReplyAt = null,
+  reminderSentAt = null,
 }) {
   return {
     slackThreadTs,
@@ -25,6 +28,9 @@ export function createThreadState({
     directQaState,
     lastAssistantPrompt,
     lastChallengePrompt,
+    awaitingUserReplyAt,
+    lastUserReplyAt,
+    reminderSentAt,
   };
 }
 

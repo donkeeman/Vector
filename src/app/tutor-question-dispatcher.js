@@ -11,6 +11,8 @@ const NOOP_LOGGER = {
   debug() {},
   error() {},
 };
+const UNANSWERED_REMINDER_DELAY_MS = 2 * 60 * 1000;
+const UNANSWERED_REMINDER_REPLY = "야, 아직 답 안 했잖아. 같은 질문에서 또 도망치지 말고 지금 스레드에서 바로 답해.";
 
 export function createTutorQuestionDispatcher({
   store,
@@ -47,10 +49,28 @@ export function createTutorQuestionDispatcher({
   async function runDispatch(now) {
     const session = (await store.getSession()) ?? createInactiveSession();
     const openThreads = await store.listOpenThreads();
-    const hasOpenStudyThread = openThreads.some((thread) => (thread.kind ?? "study") === "study");
+    const openStudyThreads = openThreads.filter((thread) => (thread.kind ?? "study") === "study");
+    const hasOpenStudyThread = openStudyThreads.length > 0;
     const hasCounterQuestionThread = openThreads.some(
       (thread) => thread.mode === "counterquestion",
     );
+
+    if (hasOpenStudyThread) {
+      const reminderThread = pickReminderCandidateThread(openStudyThreads, now);
+      if (reminderThread) {
+        await slackClient.postThreadReply(reminderThread.slackThreadTs, UNANSWERED_REMINDER_REPLY);
+        const remindedThread = {
+          ...reminderThread,
+          reminderSentAt: now,
+        };
+        await store.saveThread(remindedThread);
+        logger.debug("tutor_bot.dispatch_sent_unanswered_reminder", {
+          threadTs: remindedThread.slackThreadTs,
+          topicId: remindedThread.topicId,
+        });
+        return null;
+      }
+    }
 
     if (hasOpenStudyThread || !shouldDispatchAutoQuestion(session, hasCounterQuestionThread)) {
       logger.debug("tutor_bot.dispatch_skipped", {
@@ -118,6 +138,9 @@ export function createTutorQuestionDispatcher({
       lastAssistantPrompt: question.text,
       lastChallengePrompt: question.text,
       codexSessionId: question.codexSessionId ?? null,
+      awaitingUserReplyAt: now,
+      lastUserReplyAt: null,
+      reminderSentAt: null,
     });
 
     await store.saveThread(thread);
@@ -406,4 +429,34 @@ function createUniqueTopicId(baseId, existingIds) {
   }
 
   return nextId;
+}
+
+function pickReminderCandidateThread(openStudyThreads, now) {
+  const candidates = openStudyThreads
+    .filter((thread) => isReminderDue(thread, now))
+    .sort((left, right) => {
+      const leftAwaiting = left.awaitingUserReplyAt?.getTime() ?? 0;
+      const rightAwaiting = right.awaitingUserReplyAt?.getTime() ?? 0;
+      if (rightAwaiting !== leftAwaiting) {
+        return rightAwaiting - leftAwaiting;
+      }
+
+      return right.openedAt.getTime() - left.openedAt.getTime();
+    });
+
+  return candidates[0] ?? null;
+}
+
+function isReminderDue(thread, now) {
+  if (!thread.awaitingUserReplyAt || thread.reminderSentAt) {
+    return false;
+  }
+
+  const awaitingAt = thread.awaitingUserReplyAt.getTime();
+  const lastUserReplyAt = thread.lastUserReplyAt?.getTime() ?? null;
+  if (lastUserReplyAt !== null && lastUserReplyAt > awaitingAt) {
+    return false;
+  }
+
+  return now.getTime() - awaitingAt >= UNANSWERED_REMINDER_DELAY_MS;
 }
