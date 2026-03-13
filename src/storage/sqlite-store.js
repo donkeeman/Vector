@@ -26,6 +26,16 @@ export class SqliteStore {
 
       CREATE TABLE IF NOT EXISTS topic_memory (
         topic_id TEXT PRIMARY KEY,
+        learning_state TEXT NOT NULL DEFAULT 'new',
+        times_asked INTEGER NOT NULL DEFAULT 0,
+        times_blocked INTEGER NOT NULL DEFAULT 0,
+        times_recovered INTEGER NOT NULL DEFAULT 0,
+        times_mastered_clean INTEGER NOT NULL DEFAULT 0,
+        times_mastered_recovered INTEGER NOT NULL DEFAULT 0,
+        last_misconception_summary TEXT,
+        last_teaching_summary TEXT,
+        last_asked_at TEXT,
+        last_answered_at TEXT,
         mastery_score REAL NOT NULL,
         attempt_count INTEGER NOT NULL,
         success_count INTEGER NOT NULL,
@@ -57,6 +67,9 @@ export class SqliteStore {
         last_assistant_prompt TEXT,
         last_challenge_prompt TEXT,
         blocked_once INTEGER NOT NULL DEFAULT 0,
+        awaiting_user_reply_at TEXT,
+        last_user_reply_at TEXT,
+        reminder_sent_at TEXT,
         opened_at TEXT NOT NULL,
         closed_at TEXT,
         last_counter_question_at TEXT,
@@ -68,9 +81,21 @@ export class SqliteStore {
         thread_ts TEXT NOT NULL,
         topic_id TEXT NOT NULL,
         answer TEXT NOT NULL,
+        answer_summary TEXT,
+        misconception_summary TEXT,
+        attempt_kind TEXT,
         outcome TEXT NOT NULL,
         rationale TEXT,
         recorded_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS teaching_memory (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        topic_id TEXT NOT NULL,
+        thread_ts TEXT NOT NULL,
+        teaching_summary TEXT NOT NULL,
+        challenge_summary TEXT,
+        created_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS direct_qa_messages (
@@ -84,6 +109,7 @@ export class SqliteStore {
 
     await this.#ensureThreadColumns();
     await this.#ensureTopicMemoryColumns();
+    await this.#ensureAttemptColumns();
   }
 
   async getSession() {
@@ -161,6 +187,9 @@ export class SqliteStore {
         last_assistant_prompt,
         last_challenge_prompt,
         blocked_once,
+        awaiting_user_reply_at,
+        last_user_reply_at,
+        reminder_sent_at,
         opened_at,
         closed_at,
         last_counter_question_at,
@@ -176,6 +205,9 @@ export class SqliteStore {
         ${toSqlString(thread.lastAssistantPrompt)},
         ${toSqlString(thread.lastChallengePrompt)},
         ${toSqlInteger(thread.blockedOnce)},
+        ${toSqlDate(thread.awaitingUserReplyAt)},
+        ${toSqlDate(thread.lastUserReplyAt)},
+        ${toSqlDate(thread.reminderSentAt)},
         ${toSqlDate(thread.openedAt)},
         ${toSqlDate(normalizedClosedAt)},
         ${toSqlDate(thread.lastCounterQuestionAt)},
@@ -191,6 +223,9 @@ export class SqliteStore {
         last_assistant_prompt = excluded.last_assistant_prompt,
         last_challenge_prompt = excluded.last_challenge_prompt,
         blocked_once = excluded.blocked_once,
+        awaiting_user_reply_at = excluded.awaiting_user_reply_at,
+        last_user_reply_at = excluded.last_user_reply_at,
+        reminder_sent_at = excluded.reminder_sent_at,
         opened_at = excluded.opened_at,
         closed_at = excluded.closed_at,
         last_counter_question_at = excluded.last_counter_question_at,
@@ -284,9 +319,21 @@ export class SqliteStore {
   }
 
   async saveTopicMemory(topicId, memory) {
+    const normalized = normalizeMemoryForPersistence(memory);
+
     await this.#execute(`
       INSERT INTO topic_memory (
         topic_id,
+        learning_state,
+        times_asked,
+        times_blocked,
+        times_recovered,
+        times_mastered_clean,
+        times_mastered_recovered,
+        last_misconception_summary,
+        last_teaching_summary,
+        last_asked_at,
+        last_answered_at,
         mastery_score,
         attempt_count,
         success_count,
@@ -297,16 +344,36 @@ export class SqliteStore {
         mastered_streak
       ) VALUES (
         ${toSqlString(topicId)},
-        ${memory.masteryScore},
-        ${memory.attemptCount},
-        ${memory.successCount},
-        ${memory.failureCount},
-        ${toSqlString(memory.lastOutcome)},
-        ${toSqlString(memory.lastMasteryKind)},
-        ${toSqlDate(memory.nextReviewAt)},
-        ${memory.masteredStreak}
+        ${toSqlString(normalized.learningState)},
+        ${normalized.timesAsked},
+        ${normalized.timesBlocked},
+        ${normalized.timesRecovered},
+        ${normalized.timesMasteredClean},
+        ${normalized.timesMasteredRecovered},
+        ${toSqlString(normalized.lastMisconceptionSummary)},
+        ${toSqlString(normalized.lastTeachingSummary)},
+        ${toSqlDate(normalized.lastAskedAt)},
+        ${toSqlDate(normalized.lastAnsweredAt)},
+        ${normalized.masteryScore},
+        ${normalized.attemptCount},
+        ${normalized.successCount},
+        ${normalized.failureCount},
+        ${toSqlString(normalized.lastOutcome)},
+        ${toSqlString(normalized.lastMasteryKind)},
+        ${toSqlDate(normalized.nextReviewAt)},
+        ${normalized.masteredStreak}
       )
       ON CONFLICT(topic_id) DO UPDATE SET
+        learning_state = excluded.learning_state,
+        times_asked = excluded.times_asked,
+        times_blocked = excluded.times_blocked,
+        times_recovered = excluded.times_recovered,
+        times_mastered_clean = excluded.times_mastered_clean,
+        times_mastered_recovered = excluded.times_mastered_recovered,
+        last_misconception_summary = excluded.last_misconception_summary,
+        last_teaching_summary = excluded.last_teaching_summary,
+        last_asked_at = excluded.last_asked_at,
+        last_answered_at = excluded.last_answered_at,
         mastery_score = excluded.mastery_score,
         attempt_count = excluded.attempt_count,
         success_count = excluded.success_count,
@@ -324,6 +391,9 @@ export class SqliteStore {
         thread_ts,
         topic_id,
         answer,
+        answer_summary,
+        misconception_summary,
+        attempt_kind,
         outcome,
         rationale,
         recorded_at
@@ -331,11 +401,79 @@ export class SqliteStore {
         ${toSqlString(attempt.threadTs)},
         ${toSqlString(attempt.topicId)},
         ${toSqlString(attempt.answer)},
+        ${toSqlString(attempt.answerSummary ?? null)},
+        ${toSqlString(attempt.misconceptionSummary ?? null)},
+        ${toSqlString(attempt.attemptKind ?? null)},
         ${toSqlString(attempt.outcome)},
         ${toSqlString(attempt.rationale)},
         ${toSqlDate(attempt.recordedAt)}
       );
     `);
+  }
+
+  async listAttemptsByTopic(topicId, { limit = 5 } = {}) {
+    const parsedLimit = Number(limit);
+    const safeLimit = Number.isFinite(parsedLimit)
+      ? Math.max(1, Math.round(parsedLimit))
+      : 5;
+    const rows = await this.#query(`
+      SELECT *
+      FROM attempts
+      WHERE topic_id = ${toSqlString(topicId)}
+      ORDER BY recorded_at DESC, id DESC
+      LIMIT ${safeLimit};
+    `);
+    return rows.map((row) => ({
+      threadTs: row.thread_ts,
+      topicId: row.topic_id,
+      answer: row.answer,
+      answerSummary: row.answer_summary ?? null,
+      misconceptionSummary: row.misconception_summary ?? null,
+      attemptKind: row.attempt_kind ?? null,
+      outcome: row.outcome,
+      rationale: row.rationale ?? null,
+      recordedAt: new Date(row.recorded_at),
+    }));
+  }
+
+  async saveTeachingMemory(teachingMemory) {
+    await this.#execute(`
+      INSERT INTO teaching_memory (
+        topic_id,
+        thread_ts,
+        teaching_summary,
+        challenge_summary,
+        created_at
+      ) VALUES (
+        ${toSqlString(teachingMemory.topicId)},
+        ${toSqlString(teachingMemory.threadTs)},
+        ${toSqlString(teachingMemory.teachingSummary)},
+        ${toSqlString(teachingMemory.challengeSummary ?? null)},
+        ${toSqlDate(teachingMemory.createdAt)}
+      );
+    `);
+  }
+
+  async getLatestTeachingMemory(topicId) {
+    const rows = await this.#query(`
+      SELECT *
+      FROM teaching_memory
+      WHERE topic_id = ${toSqlString(topicId)}
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1;
+    `);
+    const row = rows[0];
+    if (!row) {
+      return null;
+    }
+
+    return {
+      topicId: row.topic_id,
+      threadTs: row.thread_ts,
+      teachingSummary: row.teaching_summary,
+      challengeSummary: row.challenge_summary ?? null,
+      createdAt: new Date(row.created_at),
+    };
   }
 
   async #query(sql) {
@@ -364,11 +502,31 @@ export class SqliteStore {
     await this.#ensureColumn("threads", columns, "last_assistant_prompt", "TEXT");
     await this.#ensureColumn("threads", columns, "last_challenge_prompt", "TEXT");
     await this.#ensureColumn("threads", columns, "blocked_once", "INTEGER NOT NULL DEFAULT 0");
+    await this.#ensureColumn("threads", columns, "awaiting_user_reply_at", "TEXT");
+    await this.#ensureColumn("threads", columns, "last_user_reply_at", "TEXT");
+    await this.#ensureColumn("threads", columns, "reminder_sent_at", "TEXT");
   }
 
   async #ensureTopicMemoryColumns() {
     const columns = await this.#query("PRAGMA table_info(topic_memory);");
+    await this.#ensureColumn("topic_memory", columns, "learning_state", "TEXT NOT NULL DEFAULT 'new'");
+    await this.#ensureColumn("topic_memory", columns, "times_asked", "INTEGER NOT NULL DEFAULT 0");
+    await this.#ensureColumn("topic_memory", columns, "times_blocked", "INTEGER NOT NULL DEFAULT 0");
+    await this.#ensureColumn("topic_memory", columns, "times_recovered", "INTEGER NOT NULL DEFAULT 0");
+    await this.#ensureColumn("topic_memory", columns, "times_mastered_clean", "INTEGER NOT NULL DEFAULT 0");
+    await this.#ensureColumn("topic_memory", columns, "times_mastered_recovered", "INTEGER NOT NULL DEFAULT 0");
+    await this.#ensureColumn("topic_memory", columns, "last_misconception_summary", "TEXT");
+    await this.#ensureColumn("topic_memory", columns, "last_teaching_summary", "TEXT");
+    await this.#ensureColumn("topic_memory", columns, "last_asked_at", "TEXT");
+    await this.#ensureColumn("topic_memory", columns, "last_answered_at", "TEXT");
     await this.#ensureColumn("topic_memory", columns, "last_mastery_kind", "TEXT");
+  }
+
+  async #ensureAttemptColumns() {
+    const columns = await this.#query("PRAGMA table_info(attempts);");
+    await this.#ensureColumn("attempts", columns, "answer_summary", "TEXT");
+    await this.#ensureColumn("attempts", columns, "misconception_summary", "TEXT");
+    await this.#ensureColumn("attempts", columns, "attempt_kind", "TEXT");
   }
 
   async #ensureColumn(tableName, columns, name, definition) {
@@ -385,7 +543,15 @@ function parseNullableDate(value) {
 }
 
 function toSqlDate(value) {
-  return value ? toSqlString(value.toISOString()) : "NULL";
+  if (!value) {
+    return "NULL";
+  }
+
+  if (value instanceof Date) {
+    return toSqlString(value.toISOString());
+  }
+
+  return toSqlString(new Date(value).toISOString());
 }
 
 function toSqlString(value) {
@@ -414,6 +580,9 @@ function mapThreadRow(row) {
     lastAssistantPrompt: row.last_assistant_prompt ?? null,
     lastChallengePrompt: row.last_challenge_prompt ?? null,
     blockedOnce: Number(row.blocked_once ?? 0) === 1,
+    awaitingUserReplyAt: parseNullableDate(row.awaiting_user_reply_at),
+    lastUserReplyAt: parseNullableDate(row.last_user_reply_at),
+    reminderSentAt: parseNullableDate(row.reminder_sent_at),
     openedAt: new Date(row.opened_at),
     closedAt: status === "open" ? null : parseNullableDate(row.closed_at),
     lastCounterQuestionAt: parseNullableDate(row.last_counter_question_at),
@@ -440,6 +609,32 @@ function fromStoredTopicId(topicId) {
 
 function mapMemoryRow(row) {
   return {
+    learningState: row.learning_state ?? inferLearningStateFromLegacyRow(row),
+    timesAsked: Number(row.times_asked ?? row.attempt_count ?? 0),
+    timesBlocked: Number(row.times_blocked ?? row.failure_count ?? 0),
+    timesRecovered: Number(
+      row.times_recovered
+        ?? row.times_mastered_recovered
+        ?? (row.last_mastery_kind === "recovered" ? row.success_count ?? 0 : 0),
+    ),
+    timesMasteredClean: Number(
+      row.times_mastered_clean
+        ?? Math.max(
+          0,
+          Number(row.success_count ?? 0) - Number(
+            row.times_mastered_recovered
+              ?? (row.last_mastery_kind === "recovered" ? row.success_count ?? 0 : 0),
+          ),
+        ),
+    ),
+    timesMasteredRecovered: Number(
+      row.times_mastered_recovered
+        ?? (row.last_mastery_kind === "recovered" ? row.success_count ?? 0 : 0),
+    ),
+    lastMisconceptionSummary: row.last_misconception_summary ?? null,
+    lastTeachingSummary: row.last_teaching_summary ?? null,
+    lastAskedAt: parseNullableDate(row.last_asked_at),
+    lastAnsweredAt: parseNullableDate(row.last_answered_at),
     masteryScore: row.mastery_score,
     attemptCount: row.attempt_count,
     successCount: row.success_count,
@@ -461,4 +656,74 @@ function mapTopicRow(row) {
     createdAt: parseNullableDate(row.created_at),
     lastUsedAt: parseNullableDate(row.last_used_at),
   };
+}
+
+function inferLearningStateFromLegacyRow(row) {
+  if (row.last_outcome === "blocked") {
+    return "blocked";
+  }
+
+  if (row.last_outcome === "continue") {
+    return "fuzzy";
+  }
+
+  if (row.last_outcome === "mastered") {
+    return row.last_mastery_kind === "recovered"
+      ? "mastered_recovered"
+      : "mastered_clean";
+  }
+
+  return "new";
+}
+
+function normalizeMemoryForPersistence(memory = {}) {
+  const successCount = Number(memory.successCount ?? 0);
+  const timesMasteredRecovered = Number(
+    memory.timesMasteredRecovered
+      ?? (memory.lastMasteryKind === "recovered" ? successCount : 0),
+  );
+  const timesMasteredClean = Number(
+    memory.timesMasteredClean ?? Math.max(0, successCount - timesMasteredRecovered),
+  );
+  const attemptCount = Number(memory.attemptCount ?? memory.timesAsked ?? 0);
+  const failureCount = Number(memory.failureCount ?? memory.timesBlocked ?? 0);
+
+  return {
+    learningState: memory.learningState ?? inferLearningStateFromLegacyValue(memory),
+    timesAsked: Number(memory.timesAsked ?? attemptCount),
+    timesBlocked: Number(memory.timesBlocked ?? failureCount),
+    timesRecovered: Number(memory.timesRecovered ?? timesMasteredRecovered),
+    timesMasteredClean,
+    timesMasteredRecovered,
+    lastMisconceptionSummary: memory.lastMisconceptionSummary ?? null,
+    lastTeachingSummary: memory.lastTeachingSummary ?? null,
+    lastAskedAt: memory.lastAskedAt ?? null,
+    lastAnsweredAt: memory.lastAnsweredAt ?? null,
+    masteryScore: Number(memory.masteryScore ?? 0),
+    attemptCount,
+    successCount,
+    failureCount,
+    lastOutcome: memory.lastOutcome ?? null,
+    lastMasteryKind: memory.lastMasteryKind ?? null,
+    nextReviewAt: memory.nextReviewAt ?? null,
+    masteredStreak: Number(memory.masteredStreak ?? 0),
+  };
+}
+
+function inferLearningStateFromLegacyValue(memory) {
+  if (memory.lastOutcome === "blocked") {
+    return "blocked";
+  }
+
+  if (memory.lastOutcome === "continue") {
+    return "fuzzy";
+  }
+
+  if (memory.lastOutcome === "mastered") {
+    return memory.lastMasteryKind === "recovered"
+      ? "mastered_recovered"
+      : "mastered_clean";
+  }
+
+  return "new";
 }
