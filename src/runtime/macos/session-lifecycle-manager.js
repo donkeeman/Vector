@@ -28,7 +28,6 @@ export class SessionLifecycleManager {
 
   async handleAppLaunch() {
     this.logger.debug("lifecycle.app_launch");
-    await this.#closeOpenStudyThreadsAsStale();
     const session = await this.tutorBot.applyControlCommand("start", this.now());
     await this.onControlCommandApplied("start", session);
     return session;
@@ -36,7 +35,6 @@ export class SessionLifecycleManager {
 
   async handleEvent(eventName) {
     if (START_EVENTS.has(eventName)) {
-      await this.#closeOpenStudyThreadsAsStale();
       this.logger.debug("lifecycle.event", {
         eventName,
         command: "start",
@@ -60,17 +58,5 @@ export class SessionLifecycleManager {
       eventName,
     });
     return null;
-  }
-
-  async #closeOpenStudyThreadsAsStale() {
-    if (typeof this.tutorBot.closeOpenStudyThreadsAsStale !== "function") {
-      return [];
-    }
-
-    const closedThreads = await this.tutorBot.closeOpenStudyThreadsAsStale(this.now());
-    this.logger.debug("lifecycle.stale_threads_closed", {
-      count: closedThreads.length,
-    });
-    return closedThreads;
   }
 }

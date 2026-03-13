@@ -3,6 +3,7 @@ import { SlackMessageRouter } from "./app/slack-message-router.js";
 import { createDebugLogger } from "./debug/debug-logger.js";
 import { TutorBot } from "./app/tutor-bot.js";
 import { CodexCliRunner } from "./llm/codex-cli-runner.js";
+import { ClaudeCliRunner } from "./llm/claude-cli-runner.js";
 import { SlackWebApiClient } from "./runtime/slack/slack-web-api-client.js";
 import { SocketModeTransport } from "./runtime/slack/socket-mode-transport.js";
 import { SessionLifecycleManager } from "./runtime/macos/session-lifecycle-manager.js";
@@ -17,15 +18,12 @@ async function main() {
   });
   const store = new SqliteStore({ databasePath: config.databasePath });
   await store.init();
+  const llmRunner = createLlmRunner({ config, logger });
 
   const bot = new TutorBot({
     store,
     topics: [],
-    llmRunner: new CodexCliRunner({
-      command: config.codexCommand,
-      model: config.codexModel,
-      logger,
-    }),
+    llmRunner,
     slackClient: new SlackWebApiClient({
       botToken: config.slackBotToken,
       channelId: config.slackChannelId,
@@ -68,6 +66,7 @@ async function main() {
 
   console.log("Vector bot core is initialized.");
   console.log("TutorBot instance ready:", Boolean(bot));
+  console.log(`LLM provider: ${config.llmProvider}`);
 
   if (config.slackAppToken) {
     try {
@@ -109,6 +108,23 @@ async function main() {
       console.error("macOS lifecycle monitor failed to start.");
     }
   }
+}
+
+function createLlmRunner({ config, logger }) {
+  if (config.llmProvider === "claude") {
+    return new ClaudeCliRunner({
+      command: config.claudeCommand,
+      model: config.claudeModel,
+      timeoutMs: config.claudeTimeoutMs,
+      logger,
+    });
+  }
+
+  return new CodexCliRunner({
+    command: config.codexCommand,
+    model: config.codexModel,
+    logger,
+  });
 }
 
 main().catch((error) => {

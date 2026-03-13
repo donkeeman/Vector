@@ -4,33 +4,14 @@ export function createStartedSession(now) {
   return {
     state: "active",
     startedAt: now,
-    pausedAt: null,
-    endedAt: null,
     expiresAt: endOfKstDay(now),
   };
 }
 
-export function pauseSession(session, now) {
+export function deactivateSession(session) {
   return {
     ...session,
-    state: "paused",
-    pausedAt: now,
-  };
-}
-
-export function resumeSession(session) {
-  return {
-    ...session,
-    state: "active",
-    pausedAt: null,
-  };
-}
-
-export function endSession(session, now) {
-  return {
-    ...session,
-    state: "ended",
-    endedAt: now,
+    state: "inactive",
   };
 }
 
@@ -39,7 +20,7 @@ export function expireSessionIfNeeded(session, now) {
     return session;
   }
 
-  if (session.state === "ended") {
+  if (session.state === "inactive") {
     return session;
   }
 
@@ -47,7 +28,7 @@ export function expireSessionIfNeeded(session, now) {
     return session;
   }
 
-  return endSession(session, now);
+  return deactivateSession(session);
 }
 
 export function shouldDispatchAutoQuestion(session, hasCounterQuestionThread) {
@@ -58,8 +39,6 @@ export function createInactiveSession() {
   return {
     state: "inactive",
     startedAt: null,
-    pausedAt: null,
-    endedAt: null,
     expiresAt: null,
   };
 }

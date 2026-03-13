@@ -33,7 +33,7 @@ No extra confirmation noise.
 ## My Stack
 
 - Runtime: Node.js ESM
-- LLM runner: `codex exec`
+- LLM runner: `codex exec` or `claude -p`
 - Persistence: SQLite (`sqlite3` CLI)
 - Slack outbound: Web API client
 - Slack inbound: Socket Mode transport
@@ -45,8 +45,12 @@ Copy `.env.example` to `.env`, then fill:
 - `SLACK_BOT_TOKEN`
 - `SLACK_APP_TOKEN`
 - `SLACK_DM_CHANNEL_ID`
+- `LLM_PROVIDER` (`codex` or `claude`)
 - `CODEX_COMMAND`
 - `CODEX_MODEL`
+- `CLAUDE_COMMAND`
+- `CLAUDE_MODEL`
+- `CLAUDE_TIMEOUT_MS`
 - `DATABASE_PATH`
 - `VECTOR_DEBUG`
 - `VECTOR_AUTO_START`

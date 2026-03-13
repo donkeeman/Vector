@@ -6,6 +6,7 @@ import {
   buildCodexExecArgs,
   keepSingleQuestion,
   normalizeBanmalText,
+  parseTaskResult,
   parseCodexThreadIdFromStdout,
 } from "../../src/llm/codex-cli-runner.js";
 import { runWithRetry } from "../../src/llm/run-with-retry.js";
@@ -51,6 +52,23 @@ test("모든 재시도가 실패하면 마지막 에러를 던진다", async () 
       ),
     /Unexpected token/,
   );
+});
+
+test("task result 파서는 JSON 코드블록 출력도 파싱한다", () => {
+  const parsed = parseTaskResult("topic", {
+    outputText: "```json\n{\"topic\":{\"id\":\"os-memory\",\"title\":\"OS Memory\",\"category\":\"os\",\"promptSeed\":\"x\",\"weight\":5}}\n```",
+    codexThreadId: null,
+  });
+
+  assert.deepEqual(parsed, {
+    topic: {
+      id: "os-memory",
+      title: "OS Memory",
+      category: "os",
+      promptSeed: "x",
+      weight: 5,
+    },
+  });
 });
 
 test("direct_question 지시는 반말 응답을 요구한다", () => {
@@ -109,12 +127,19 @@ test("teach 지시는 막힌 지점을 직접 교정하도록 요구한다", () 
   assert.match(source, /teach[\s\S]*exact failure point/u);
   assert.match(source, /teach[\s\S]*answer scaffold/u);
   assert.match(source, /teach[\s\S]*thread\.lastAssistantPrompt/u);
+  assert.match(source, /teach[\s\S]*learning request, not evasion/u);
+  assert.match(source, /teach[\s\S]*short rivalry taunt/u);
+  assert.match(source, /teach[\s\S]*1-2 sentences/u);
+  assert.match(source, /teach[\s\S]*answer quality only/u);
+  assert.match(source, /teach[\s\S]*회피/u);
 });
 
 test("study 평가/꼬리질문/교정 지시는 lastChallengePrompt를 기준으로 같은 지점을 추적한다", () => {
   const source = readFileSync(new URL("../../src/llm/codex-cli-runner.js", import.meta.url), "utf8");
 
   assert.match(source, /evaluate[\s\S]*lastChallengePrompt/u);
+  assert.match(source, /evaluate[\s\S]*do not know/u);
+  assert.match(source, /evaluate[\s\S]*set outcome to blocked/u);
   assert.match(source, /followup[\s\S]*lastChallengePrompt/u);
   assert.match(source, /teach[\s\S]*lastChallengePrompt/u);
   assert.match(source, /teach[\s\S]*challengePrompt/u);
@@ -175,6 +200,11 @@ test("direct_thread_turn task는 짧고 서툰 답변 시도도 오프트픽으�
   assert.match(source, /direct_thread_turn[\s\S]*tentative/u);
   assert.match(source, /direct_thread_turn[\s\S]*wrong/u);
   assert.match(source, /direct_thread_turn[\s\S]*still answer attempts/u);
+  assert.match(source, /direct_thread_turn[\s\S]*do not know/u);
+  assert.match(source, /direct_thread_turn[\s\S]*short rivalry taunt/u);
+  assert.match(source, /direct_thread_turn[\s\S]*explain first/u);
+  assert.match(source, /direct_thread_turn[\s\S]*not frame[\s\S]*evasion/u);
+  assert.match(source, /direct_thread_turn[\s\S]*answer quality only/u);
 });
 
 test("direct Q&A task는 codex session id가 있으면 resume 경로를 쓴다", () => {

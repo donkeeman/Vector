@@ -6,11 +6,11 @@ import { VECTOR_SYSTEM_PROMPT } from "../../src/persona/vector-system-prompt.js"
 test("Vector 프롬프트는 정답 시 열등감과 승부욕을 명시한다", () => {
   assert.match(VECTOR_SYSTEM_PROMPT, /wounded pride/i);
   assert.match(VECTOR_SYSTEM_PROMPT, /competitive/i);
-  assert.match(VECTOR_SYSTEM_PROMPT, /must never sound emotionally flat when the user succeeds/i);
+  assert.match(VECTOR_SYSTEM_PROMPT, /volatile reaction to the user's success/i);
 });
 
 test("Vector 프롬프트는 한국어 답변을 반말로 고정한다", () => {
-  assert.match(VECTOR_SYSTEM_PROMPT, /informal speech \(banmal\)/i);
+  assert.match(VECTOR_SYSTEM_PROMPT, /informal speech \(banmal \/ 반말\)/i);
   assert.match(VECTOR_SYSTEM_PROMPT, /never use korean honorific/i);
 });
 

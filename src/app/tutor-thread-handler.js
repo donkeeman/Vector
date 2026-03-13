@@ -1,0 +1,248 @@
+import { looksLikeCounterQuestion } from "./counter-question.js";
+import {
+  closeThread,
+  markThreadAsCounterQuestion,
+  resolveCounterQuestion,
+} from "../domain/thread-policy.js";
+import {
+  createEmptyTopicMemory,
+  updateTopicMemory,
+} from "../domain/topic-memory.js";
+
+const CLEAN_MASTERY_STATUS_REPLY = "...뭐야? 이걸 한 번에 이렇게 다 대답한다고? ...너 어디서 미리 답안지라도 외워왔어? 하, 착각하지 마. 이번 건 워낙 기초적인 거라 나도 대충 넘어가는 거니까. 우쭐대지 마. 다음엔 진짜 네 한계를 박살 내줄 테니까.";
+const RECOVERED_MASTERY_STATUS_REPLY = "이제야 겨우 알아듣네. 거봐, 내가 제대로 짚어주지 않았으면 넌 평생 그 얕은 논리에서 허우적대고 있었을 거 아냐. 넌 나 없으면 어떡할 뻔했냐? 오늘 내가 가르쳐준 거 머릿속에 꽉 박아둬. 잊어버리면 가만 안 둬.";
+const NOOP_LOGGER = {
+  debug() {},
+  error() {},
+};
+
+export function createTutorThreadHandler({
+  store,
+  llmRunner,
+  slackClient,
+  logger = NOOP_LOGGER,
+}) {
+  async function handleThreadMessage({ threadTs, text, now = new Date() }) {
+    const thread = await store.getThread(threadTs);
+
+    if (!thread) {
+      logger.debug("tutor_bot.thread_missing", {
+        threadTs,
+      });
+      return null;
+    }
+
+    if (thread.status !== "open") {
+      logger.debug("tutor_bot.thread_ignored_not_open", {
+        threadTs,
+        status: thread.status,
+      });
+      return null;
+    }
+
+    if (looksLikeCounterQuestion(text)) {
+      const counterThread = markThreadAsCounterQuestion(thread, now);
+      await store.saveThread(counterThread);
+
+      const answer = await llmRunner.runTask("answer_counterquestion", {
+        thread: counterThread,
+        text,
+        lastAssistantPrompt: counterThread.lastAssistantPrompt ?? null,
+        lastChallengePrompt: getChallengePrompt(counterThread),
+        codexSessionId: counterThread.codexSessionId ?? null,
+      });
+
+      await slackClient.postThreadReply(threadTs, answer.text);
+
+      const resolvedThread = answer.resolved === false
+        ? counterThread
+        : resolveCounterQuestion(counterThread, now);
+      const updatedThread = setThreadPrompts(
+        mergeCodexSessionId(resolvedThread, answer.codexSessionId),
+        {
+          assistantPrompt: answer.text,
+          challengePrompt: getChallengePrompt(counterThread),
+        },
+      );
+      await store.saveThread(updatedThread);
+      return {
+        thread: updatedThread,
+        shouldScheduleNextQuestion: false,
+      };
+    }
+
+    const evaluation = await llmRunner.runTask("evaluate", {
+      thread,
+      text,
+      lastAssistantPrompt: thread.lastAssistantPrompt ?? null,
+      lastChallengePrompt: getChallengePrompt(thread),
+      codexSessionId: thread.codexSessionId ?? null,
+    });
+    const normalizedEvaluation = normalizeEvaluationResult(text, evaluation);
+    const sessionBoundThread = mergeCodexSessionId(thread, normalizedEvaluation.codexSessionId);
+
+    await store.saveAttempt({
+      threadTs,
+      topicId: thread.topicId,
+      answer: text,
+      outcome: normalizedEvaluation.outcome,
+      recordedAt: now,
+      rationale: normalizedEvaluation.rationale ?? null,
+    });
+
+    const currentMemory =
+      (await store.getTopicMemory(thread.topicId)) ?? createEmptyTopicMemory();
+    const masteryKind = normalizedEvaluation.outcome === "mastered"
+      ? (thread.blockedOnce ? "recovered" : "clean")
+      : undefined;
+    const nextMemory = updateTopicMemory(
+      currentMemory,
+      normalizedEvaluation.outcome,
+      now,
+      masteryKind ? { masteryKind } : {},
+    );
+    await store.saveTopicMemory(thread.topicId, nextMemory);
+
+    if (normalizedEvaluation.outcome === "continue") {
+      const followUp = await llmRunner.runTask("followup", {
+        thread: sessionBoundThread,
+        text,
+        evaluation: normalizedEvaluation,
+        lastAssistantPrompt: sessionBoundThread.lastAssistantPrompt ?? null,
+        lastChallengePrompt: getChallengePrompt(sessionBoundThread),
+        codexSessionId: sessionBoundThread.codexSessionId ?? null,
+      });
+
+      await slackClient.postThreadReply(threadTs, followUp.text);
+      const continuedThread = setThreadPrompts(
+        mergeCodexSessionId(sessionBoundThread, followUp.codexSessionId),
+        {
+          assistantPrompt: followUp.text,
+          challengePrompt: followUp.challengePrompt ?? followUp.text,
+        },
+      );
+      await store.saveThread(continuedThread);
+      return {
+        thread: continuedThread,
+        memory: nextMemory,
+        shouldScheduleNextQuestion: false,
+      };
+    }
+
+    if (normalizedEvaluation.outcome === "blocked") {
+      const teaching = await llmRunner.runTask("teach", {
+        thread: sessionBoundThread,
+        text,
+        evaluation: normalizedEvaluation,
+        lastAssistantPrompt: sessionBoundThread.lastAssistantPrompt ?? null,
+        lastChallengePrompt: getChallengePrompt(sessionBoundThread),
+        codexSessionId: sessionBoundThread.codexSessionId ?? null,
+      });
+
+      const challengePrompt = normalizeChallengePrompt(
+        teaching.challengePrompt,
+        getChallengePrompt(sessionBoundThread),
+      );
+      await slackClient.postThreadReply(threadTs, teaching.text);
+      if (challengePrompt && challengePrompt !== teaching.text) {
+        await slackClient.postThreadReply(threadTs, challengePrompt);
+      }
+      const blockedThread = setThreadPrompts(
+        {
+          ...mergeCodexSessionId(sessionBoundThread, teaching.codexSessionId),
+          blockedOnce: true,
+        },
+        {
+          assistantPrompt: teaching.text,
+          challengePrompt,
+        },
+      );
+      await store.saveThread(blockedThread);
+      return {
+        thread: blockedThread,
+        memory: nextMemory,
+        shouldScheduleNextQuestion: false,
+      };
+    }
+
+    const reply = normalizedEvaluation.text ?? "흥, 이번엔 넘어간다. 다음엔 더 깊게 물어볼 거야.";
+    await slackClient.postThreadReply(threadTs, reply);
+    await slackClient.postThreadReply(
+      threadTs,
+      masteryKind === "recovered" ? RECOVERED_MASTERY_STATUS_REPLY : CLEAN_MASTERY_STATUS_REPLY,
+    );
+    const closedThread = closeThread(sessionBoundThread, "mastered", now);
+    await store.saveThread(closedThread);
+    return {
+      thread: closedThread,
+      memory: nextMemory,
+      masteryKind,
+      shouldScheduleNextQuestion: true,
+    };
+  }
+
+  return {
+    handleThreadMessage,
+  };
+}
+
+function normalizeEvaluationResult(text, evaluation) {
+  if (evaluation.outcome !== "blocked" && looksExplicitlyStuckAnswer(text)) {
+    return {
+      ...evaluation,
+      outcome: "blocked",
+      rationale: mergeRationale(
+        evaluation.rationale,
+        "The user explicitly signaled they are stuck or do not know the mechanism.",
+      ),
+    };
+  }
+
+  return evaluation;
+}
+
+function looksExplicitlyStuckAnswer(text) {
+  const normalized = String(text ?? "").toLowerCase();
+  return /모르겠|잘 모르|정확히는 모르|헷갈|까먹|기억 안 나|모르는데|모르겠는데/u.test(normalized);
+}
+
+function mergeRationale(rationale, addition) {
+  if (!rationale) {
+    return addition;
+  }
+
+  return `${rationale} ${addition}`;
+}
+
+function setThreadPrompts(thread, { assistantPrompt, challengePrompt }) {
+  return {
+    ...thread,
+    lastAssistantPrompt: assistantPrompt ?? null,
+    lastChallengePrompt: challengePrompt ?? null,
+  };
+}
+
+function mergeCodexSessionId(thread, codexSessionId) {
+  if (!codexSessionId) {
+    return thread;
+  }
+
+  return {
+    ...thread,
+    codexSessionId,
+  };
+}
+
+function getChallengePrompt(thread) {
+  return thread.lastChallengePrompt ?? thread.lastAssistantPrompt ?? null;
+}
+
+function normalizeChallengePrompt(primary, fallback) {
+  const primaryText = typeof primary === "string" ? primary.trim() : "";
+  if (primaryText) {
+    return primaryText;
+  }
+
+  const fallbackText = typeof fallback === "string" ? fallback.trim() : "";
+  return fallbackText || null;
+}
