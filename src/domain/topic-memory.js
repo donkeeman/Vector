@@ -1,5 +1,10 @@
 import { addKstDays } from "./time.js";
 
+const DEFAULT_LANE_WEIGHTS = {
+  new: 60,
+  review: 40,
+};
+
 export function createEmptyTopicMemory() {
   return {
     learningState: "new",
@@ -157,26 +162,59 @@ export function classifyReviewPriority(memory, now) {
   return null;
 }
 
-export function pickNextTopic({ now, topics, memories }) {
+export function selectStudyLane({
+  hasNewTopic,
+  hasReviewTopic,
+  random = Math.random,
+  laneWeights = DEFAULT_LANE_WEIGHTS,
+}) {
+  if (hasNewTopic && !hasReviewTopic) {
+    return "new";
+  }
+
+  if (hasReviewTopic && !hasNewTopic) {
+    return "review";
+  }
+
+  if (!hasNewTopic && !hasReviewTopic) {
+    return null;
+  }
+
+  const newWeightRaw = Number(laneWeights?.new ?? DEFAULT_LANE_WEIGHTS.new);
+  const reviewWeightRaw = Number(laneWeights?.review ?? DEFAULT_LANE_WEIGHTS.review);
+  const newWeight = Number.isFinite(newWeightRaw) ? Math.max(0, newWeightRaw) : DEFAULT_LANE_WEIGHTS.new;
+  const reviewWeight = Number.isFinite(reviewWeightRaw)
+    ? Math.max(0, reviewWeightRaw)
+    : DEFAULT_LANE_WEIGHTS.review;
+  const total = newWeight + reviewWeight;
+
+  if (total <= 0) {
+    return random() < 0.5 ? "new" : "review";
+  }
+
+  return random() < (newWeight / total) ? "new" : "review";
+}
+
+export function pickReviewTopic({ now, topics, memories }) {
+  const memoryMap = memories instanceof Map ? memories : new Map();
   const candidates = topics
     .map((topic) => {
-      const memory = memories.get(topic.id) ?? null;
-      const bucket = classifyCandidateBucket(memory, now);
-
-      if (bucket === null) {
+      const memory = memoryMap.get(topic.id) ?? null;
+      const priority = classifyReviewPriority(memory, now);
+      if (priority === null) {
         return null;
       }
 
       return {
         topic,
-        bucket,
+        priority,
         effectiveWeight: Math.max(1, topic.weight ?? 1),
       };
     })
     .filter(Boolean)
     .sort((left, right) => {
-      if (right.bucket !== left.bucket) {
-        return right.bucket - left.bucket;
+      if (right.priority !== left.priority) {
+        return right.priority - left.priority;
       }
 
       if (right.effectiveWeight !== left.effectiveWeight) {
@@ -189,31 +227,29 @@ export function pickNextTopic({ now, topics, memories }) {
   return candidates[0]?.topic ?? null;
 }
 
-function classifyCandidateBucket(memory, now) {
-  const lane = classifyTopicLane(memory);
-  if (lane === "new") {
-    return 2;
+export function pickNextTopic({ now, topics, memories }) {
+  const memoryMap = memories instanceof Map ? memories : new Map();
+  const reviewTopic = pickReviewTopic({
+    now,
+    topics,
+    memories: memoryMap,
+  });
+  if (reviewTopic) {
+    return reviewTopic;
   }
 
-  const reviewPriority = classifyReviewPriority(memory, now);
+  const newTopics = topics
+    .filter((topic) => classifyTopicLane(memoryMap.get(topic.id) ?? null) === "new")
+    .sort((left, right) => {
+      const leftWeight = Math.max(1, left.weight ?? 1);
+      const rightWeight = Math.max(1, right.weight ?? 1);
+      if (rightWeight !== leftWeight) {
+        return rightWeight - leftWeight;
+      }
+      return left.id.localeCompare(right.id);
+    });
 
-  if (reviewPriority === 4) {
-    return 4;
-  }
-
-  if (reviewPriority === 3) {
-    return 3;
-  }
-
-  if (reviewPriority === 2) {
-    return 1.5;
-  }
-
-  if (reviewPriority === 1) {
-    return 1;
-  }
-
-  return null;
+  return newTopics[0] ?? null;
 }
 
 function clamp(value, min, max) {

@@ -5,6 +5,8 @@ import {
   classifyReviewPriority,
   classifyTopicLane,
   createEmptyTopicMemory,
+  pickReviewTopic,
+  selectStudyLane,
   updateTopicMemory,
 } from "../../src/domain/topic-memory.js";
 
@@ -81,4 +83,82 @@ test("new > review lane 분류와 review 우선순위(blocked > fuzzy > mastered
   assert.equal(classifyReviewPriority(fuzzyMemory, now), 3);
   assert.equal(classifyReviewPriority(recoveredMemory, now), 2);
   assert.equal(classifyReviewPriority(cleanMemory, now), 1);
+});
+
+test("lane selector는 new/review가 모두 가능하면 기본 비율을 new 60, review 40으로 고른다", () => {
+  let newCount = 0;
+  let reviewCount = 0;
+
+  for (let index = 0; index < 100; index += 1) {
+    const lane = selectStudyLane({
+      hasNewTopic: true,
+      hasReviewTopic: true,
+      random: () => index / 100,
+    });
+
+    if (lane === "new") {
+      newCount += 1;
+    } else if (lane === "review") {
+      reviewCount += 1;
+    }
+  }
+
+  assert.equal(newCount, 60);
+  assert.equal(reviewCount, 40);
+  assert.ok(newCount > reviewCount);
+});
+
+test("review lane에서 topic 선택 우선순위는 blocked > fuzzy > mastered_recovered > mastered_clean이다", () => {
+  const now = new Date("2026-03-10T10:00:00+09:00");
+  const topics = [
+    { id: "blocked-topic", title: "Blocked", category: "os", promptSeed: "x", weight: 1 },
+    { id: "fuzzy-topic", title: "Fuzzy", category: "os", promptSeed: "x", weight: 1 },
+    { id: "recovered-topic", title: "Recovered", category: "os", promptSeed: "x", weight: 1 },
+    { id: "clean-topic", title: "Clean", category: "os", promptSeed: "x", weight: 1 },
+  ];
+
+  const selected = pickReviewTopic({
+    now,
+    topics,
+    memories: new Map([
+      [
+        "blocked-topic",
+        {
+          ...createEmptyTopicMemory(),
+          timesAsked: 1,
+          learningState: "blocked",
+          nextReviewAt: now,
+        },
+      ],
+      [
+        "fuzzy-topic",
+        {
+          ...createEmptyTopicMemory(),
+          timesAsked: 1,
+          learningState: "fuzzy",
+          nextReviewAt: now,
+        },
+      ],
+      [
+        "recovered-topic",
+        {
+          ...createEmptyTopicMemory(),
+          timesAsked: 1,
+          learningState: "mastered_recovered",
+          nextReviewAt: now,
+        },
+      ],
+      [
+        "clean-topic",
+        {
+          ...createEmptyTopicMemory(),
+          timesAsked: 1,
+          learningState: "mastered_clean",
+          nextReviewAt: now,
+        },
+      ],
+    ]),
+  });
+
+  assert.equal(selected?.id, "blocked-topic");
 });

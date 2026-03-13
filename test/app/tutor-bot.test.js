@@ -487,6 +487,81 @@ test("기본 topic selector는 같은 사이클에서 가능한 한 다양한 �
   assert.equal(new Set(askedTopicIds).size, 3);
 });
 
+test("new topic이 남아 있으면 같은 review topic을 연속으로 반복하지 않는다", async () => {
+  const store = createInMemoryStore();
+  store.session = createStartedSession(new Date("2026-03-10T09:00:00+09:00"));
+  await store.saveTopic({
+    id: "review-topic",
+    title: "Review Topic",
+    category: "network",
+    promptSeed: "Explain TCP flow control.",
+    weight: 3,
+  });
+  await store.saveTopic({
+    id: "new-topic-1",
+    title: "New Topic 1",
+    category: "frontend",
+    promptSeed: "Explain event loop.",
+    weight: 3,
+  });
+  await store.saveTopic({
+    id: "new-topic-2",
+    title: "New Topic 2",
+    category: "db",
+    promptSeed: "Explain B-tree.",
+    weight: 3,
+  });
+  await store.saveTopicMemory("review-topic", {
+    learningState: "blocked",
+    timesAsked: 1,
+    timesBlocked: 1,
+    timesRecovered: 0,
+    timesMasteredClean: 0,
+    timesMasteredRecovered: 0,
+    lastOutcome: "blocked",
+    nextReviewAt: new Date("2026-03-10T09:00:00+09:00"),
+  });
+
+  const askedTopicIds = [];
+  let sequence = 0;
+  const bot = new TutorBot({
+    store,
+    topics: [],
+    random: () => 0.99,
+    llmRunner: {
+      async runTask(type, payload) {
+        if (type === "question") {
+          askedTopicIds.push(payload.topic.id);
+          return { text: `${payload.topic.id} 질문` };
+        }
+
+        throw new Error(`unexpected task: ${type}`);
+      },
+    },
+    slackClient: {
+      async postDirectMessage() {
+        sequence += 1;
+        return { channel: "D123", ts: `111.7${sequence}` };
+      },
+      async postThreadReply() {
+        throw new Error("should not be called");
+      },
+    },
+  });
+
+  const first = await bot.dispatchNextQuestion(new Date("2026-03-10T09:05:00+09:00"));
+  await store.saveThread({
+    ...first,
+    status: "mastered",
+    closedAt: new Date("2026-03-10T09:05:30+09:00"),
+  });
+  const second = await bot.dispatchNextQuestion(new Date("2026-03-10T09:06:00+09:00"));
+
+  assert.equal(askedTopicIds[0], "review-topic");
+  assert.notEqual(askedTopicIds[1], "review-topic");
+  assert.equal(second?.topicId === "new-topic-1" || second?.topicId === "new-topic-2", true);
+});
+
 test("!start 직후 첫 질문 발송이 실패해도 세션은 active로 유지된다", async () => {
   const store = createInMemoryStore();
   store.session = createInactiveSession();

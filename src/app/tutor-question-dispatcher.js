@@ -1,6 +1,11 @@
 import { createInactiveSession, shouldDispatchAutoQuestion } from "../domain/session-policy.js";
 import { createThreadState } from "../domain/thread-policy.js";
-import { pickNextTopic } from "../domain/topic-memory.js";
+import {
+  classifyReviewPriority,
+  classifyTopicLane,
+  pickReviewTopic,
+  selectStudyLane,
+} from "../domain/topic-memory.js";
 
 const NOOP_LOGGER = {
   debug() {},
@@ -245,26 +250,72 @@ export function pickTopicForContinuousFlow({
   }
 
   const memoryMap = memories instanceof Map ? memories : new Map();
+  const newTopicCandidates = topics.filter((topic) => {
+    const memory = memoryMap.get(topic.id) ?? null;
+    return classifyTopicLane(memory) === "new";
+  });
   const reviewCandidates = topics.filter((topic) => {
-    const memory = memoryMap.get(topic.id);
-    if (!memory) {
-      return false;
-    }
-    if (memory.nextReviewAt && memory.nextReviewAt.getTime() > now.getTime()) {
-      return false;
-    }
-    return true;
+    const memory = memoryMap.get(topic.id) ?? null;
+    return classifyReviewPriority(memory, now) !== null;
+  });
+  const lane = selectStudyLane({
+    hasNewTopic: newTopicCandidates.length > 0,
+    hasReviewTopic: reviewCandidates.length > 0,
+    random,
   });
 
-  if (reviewCandidates.length > 0) {
-    return pickNextTopic({
+  if (!lane) {
+    return null;
+  }
+
+  if (lane === "review") {
+    const reviewTopic = pickReviewTopic({
       now,
       topics: reviewCandidates,
       memories: memoryMap,
     });
+
+    if (
+      reviewTopic
+      && newTopicCandidates.length > 0
+      && reviewTopic.id === lastTopicId
+    ) {
+      return pickNewTopic({
+        newTopicCandidates,
+        random,
+        lastTopicId,
+        state,
+      });
+    }
+
+    if (reviewTopic) {
+      return reviewTopic;
+    }
   }
 
-  const newTopicCandidates = topics.filter((topic) => memoryMap.has(topic.id) === false);
+  const newTopic = pickNewTopic({
+    newTopicCandidates,
+    random,
+    lastTopicId,
+    state,
+  });
+  if (newTopic) {
+    return newTopic;
+  }
+
+  return pickReviewTopic({
+    now,
+    topics: reviewCandidates,
+    memories: memoryMap,
+  });
+}
+
+function pickNewTopic({
+  newTopicCandidates,
+  random,
+  lastTopicId,
+  state,
+}) {
   if (newTopicCandidates.length === 0) {
     return null;
   }
