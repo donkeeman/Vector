@@ -362,5 +362,8 @@ export function parseCodexThreadIdFromStdout(stdout) {
   return null;
 }
 
+export { buildTaskPrompt };
+export { parseTaskResult };
+export { isSessionAwareTask };
 export { keepSingleQuestion };
 export { normalizeBanmalText };

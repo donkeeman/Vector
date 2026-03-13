@@ -7,13 +7,21 @@ export function loadConfig(env = process.env) {
     ...fileEnv,
     ...env,
   };
+  const llmProvider = String(mergedEnv.LLM_PROVIDER ?? "codex").trim().toLowerCase();
+  const claudeTimeoutMs = Number.parseInt(mergedEnv.CLAUDE_TIMEOUT_MS ?? "120000", 10);
 
   return {
     slackBotToken: mergedEnv.SLACK_BOT_TOKEN ?? "",
     slackAppToken: mergedEnv.SLACK_APP_TOKEN ?? "",
     slackChannelId: mergedEnv.SLACK_DM_CHANNEL_ID ?? "",
+    llmProvider: llmProvider === "claude" ? "claude" : "codex",
     codexCommand: mergedEnv.CODEX_COMMAND ?? "codex",
     codexModel: mergedEnv.CODEX_MODEL ?? null,
+    claudeCommand: mergedEnv.CLAUDE_COMMAND ?? "claude",
+    claudeModel: mergedEnv.CLAUDE_MODEL ?? null,
+    claudeTimeoutMs: Number.isFinite(claudeTimeoutMs) && claudeTimeoutMs > 0
+      ? claudeTimeoutMs
+      : 120_000,
     databasePath: resolve(mergedEnv.DATABASE_PATH ?? "./data/vector.sqlite"),
     debugEnabled: mergedEnv.VECTOR_DEBUG === "1",
     autoStartEnabled: mergedEnv.VECTOR_AUTO_START !== "0",
