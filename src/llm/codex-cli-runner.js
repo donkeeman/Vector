@@ -94,7 +94,7 @@ function buildTaskInstructions(taskType) {
 }
 
 function parseTaskResult(taskType, raw) {
-  const parsed = JSON.parse(raw.outputText);
+  const parsed = parseJsonObject(raw.outputText);
   const questionNormalized = normalizeSingleQuestionTasks(taskType, parsed);
   const normalized = normalizeReplyStyle(taskType, questionNormalized);
 
@@ -108,23 +108,94 @@ function parseTaskResult(taskType, raw) {
   };
 }
 
+function parseJsonObject(text) {
+  const source = String(text ?? "").trim();
+
+  try {
+    return JSON.parse(source);
+  } catch {
+    // JSON 코드블록이나 부가 문구가 섞인 출력도 구조화 JSON만 추출해 파싱합니다.
+  }
+
+  const fenced = source.match(/```(?:json)?\s*([\s\S]*?)\s*```/iu);
+  if (fenced?.[1]) {
+    try {
+      return JSON.parse(fenced[1]);
+    } catch {
+      // fenced JSON 파싱 실패 시 일반 JSON 조각 추출로 진행합니다.
+    }
+  }
+
+  const extracted = extractBalancedJson(source);
+  if (extracted) {
+    return JSON.parse(extracted);
+  }
+
+  return JSON.parse(source);
+}
+
+function extractBalancedJson(text) {
+  const startIndex = text.search(/[{\[]/u);
+  if (startIndex < 0) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = startIndex; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{" || char === "[") {
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}" || char === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(startIndex, index + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
 const TASK_INSTRUCTIONS = {
   topic:
     'Return {"topic":{"id":"kebab-case-id","title":"...","category":"...","promptSeed":"...","weight":1-10}} for a new CS/dev learning topic. Avoid duplicates with existingTopics/recentTopics. Pick broad computer-science or adjacent engineering topics (os, network, database, language runtime, distributed systems, security, tooling, testing, architecture). Do not output a question in this task; only topic metadata.',
   question:
     'Return {"text":"..."} with exactly one concise CS question only. Never combine two asks in one turn (no multi-part asks joined by "and" equivalents). If payload.topicMemory is null or topicMemory.attemptCount is 0, ask a foundational concept-definition question first (for example "X가 뭐야?" level) before mechanism-heavy depth. If you add rivalry taunt, keep it as a statement without a question mark. The only question mark must belong to the technical question. The tone must be provocative, playful, and openly competitive, like a genius rival testing weak points.',
   evaluate:
-    'Return {"outcome":"continue|blocked|mastered","rationale":"...","text":"optional closing reply when mastered"} based on the answer quality. Evaluate the user answer against thread.lastChallengePrompt first (fallback: thread.lastAssistantPrompt). If the latest user message contains ambiguous references such as "that/it/why that", resolve them to thread.lastChallengePrompt by default when available.',
+    'Return {"outcome":"continue|blocked|mastered","rationale":"...","text":"optional closing reply when mastered"} based on the answer quality. Evaluate the user answer against thread.lastChallengePrompt first (fallback: thread.lastAssistantPrompt). If the latest user message explicitly says they do not know (for example "잘 모르겠어", "모르겠어", "몰라"), set outcome to blocked. If the latest user message contains ambiguous references such as "that/it/why that", resolve them to thread.lastChallengePrompt by default when available.',
   followup:
     'Return {"text":"..."} with exactly one sharper follow-up question only. Keep the follow-up anchored to the same sub-concept as thread.lastChallengePrompt and evaluation.rationale; do not jump to a different topic. Never stack two follow-up asks in one message. If you add rivalry taunt, keep it as a statement without a question mark. The only question mark must belong to the technical follow-up. Keep the tone provocative and irritated, as if the user barely earned the next question.',
   teach:
-    'Return {"text":"...","challengePrompt":"..."} where text gives a brief correction for the exact failure point and challengePrompt gives exactly one re-check question on the same sub-concept as thread.lastChallengePrompt. Rebuild a short answer scaffold for the precise question they failed, not a generic recap. If the user says "that/it/why that" ambiguously, treat it as referring to thread.lastChallengePrompt first (fallback: thread.lastAssistantPrompt) and explain directly instead of asking what it means. The tone should be sharp, slightly mocking, and competitive, not kind.',
+    'Return {"text":"...","challengePrompt":"..."} where text gives a brief correction for the exact failure point and challengePrompt gives exactly one re-check question on the same sub-concept as thread.lastChallengePrompt. Rebuild a short answer scaffold for the precise question they failed, not a generic recap. If the user explicitly says they do not know (for example "잘 모르겠어", "모르겠어", "몰라"), treat it as a learning request, not evasion: you may open with one short rivalry taunt, then immediately give a concrete explanation in 1-2 sentences before asking the re-check question. Keep the taunt about answer quality only, never about identity/intelligence. Do not use wording that frames the user as dodging (for example "회피"). If the user says "that/it/why that" ambiguously, treat it as referring to thread.lastChallengePrompt first (fallback: thread.lastAssistantPrompt) and explain directly instead of asking what it means. The tone should be sharp, slightly mocking, and competitive, not kind.',
   answer_counterquestion:
     'Return {"text":"...","resolved":true|false}. Set resolved=false only if the user will likely continue the side question. If the user uses ambiguous references like "that/it/why that", resolve them to thread.lastChallengePrompt first (fallback: thread.lastAssistantPrompt) and answer directly. Do not bounce back with "what do you mean by that?" unless there is a real contradiction. Always reply in Korean informal speech (banmal), never honorific style. Answer in a rival tone that still keeps the discussion moving.',
   direct_question:
     'The user asked a direct question in Slack DM. Interpret the latest question literally first. Do not invent confusion, hidden intent, or background that the user did not say. If a technical term overlaps with the bot name, answer the technical meaning first instead of roleplaying the ambiguity. Return {"text":"...","nextState":"open|awaiting_answer","challengePrompt":"question or null"} with a concise but sharp Vector-style answer in Korean informal speech (banmal). Never use honorific Korean endings. Do not grade the user. Keep a genius rival tone, slightly mocking and clearly competitive.',
   direct_thread_turn:
-    'The user replied inside an ongoing direct Q&A Slack thread. Use the provided history to answer the latest turn in Korean informal speech (banmal). Never use honorific Korean endings. Interpret the latest message literally first. Do not invent confusion, hidden intent, or background that the user did not say. Use the thread state, thread.lastChallengePrompt, and last assistant prompt to decide whether the latest user turn is an answer attempt, a same-context follow-up, or a pivot to a new question. Treat short paraphrase, restatement, clarification, and understanding-check turns (for example, "in other words", "so", "so you mean...?") or tentative confirm/correct attempts as same-context technical turns. If the thread is awaiting an answer, evaluate the latest user message as an answer attempt against the current challenge before anything else. Short, tentative, partial, or plainly wrong replies to the current challenge are still answer attempts. Do not reject brief answers like guesses, rough summaries, or incomplete reasoning just because they are vague. If the user gives up and pivots to a new question in the same message, briefly close the failed challenge and then answer the pivot. Return {"text":"...","nextState":"open|awaiting_answer","challengePrompt":"question or null"} only. Keep the reply provocative, tight, rival-like, and capable of handling answer attempt, same-context paraphrase confirmation, and pivot cleanly.',
+    'The user replied inside an ongoing direct Q&A Slack thread. Use the provided history to answer the latest turn in Korean informal speech (banmal). Never use honorific Korean endings. Interpret the latest message literally first. Do not invent confusion, hidden intent, or background that the user did not say. Use the thread state, thread.lastChallengePrompt, and last assistant prompt to decide whether the latest user turn is an answer attempt, a same-context follow-up, or a pivot to a new question. Treat short paraphrase, restatement, clarification, and understanding-check turns (for example, "in other words", "so", "so you mean...?") or tentative confirm/correct attempts as same-context technical turns. If the thread is awaiting an answer, evaluate the latest user message as an answer attempt against the current challenge before anything else. Short, tentative, partial, or plainly wrong replies to the current challenge are still answer attempts. Do not reject brief answers like guesses, rough summaries, or incomplete reasoning just because they are vague. If the latest user message explicitly says they do not know, you may open with one short rivalry taunt, then explain first in 1-2 concrete sentences, then optionally ask one same-context challenge; do not frame "I do not know" as evasion or refusal. Keep the taunt about answer quality only, never about identity/intelligence. If the user gives up and pivots to a new question in the same message, briefly close the failed challenge and then answer the pivot. Return {"text":"...","nextState":"open|awaiting_answer","challengePrompt":"question or null"} only. Keep the reply provocative, tight, rival-like, and capable of handling answer attempt, same-context paraphrase confirmation, and pivot cleanly.',
 };
 
 const TASK_EXECUTION_PROFILE = {
