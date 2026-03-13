@@ -138,9 +138,6 @@ export function createTutorQuestionDispatcher({
       lastAssistantPrompt: question.text,
       lastChallengePrompt: question.text,
       codexSessionId: question.codexSessionId ?? null,
-      awaitingUserReplyAt: now,
-      lastUserReplyAt: null,
-      reminderSentAt: null,
     });
 
     await store.saveThread(thread);

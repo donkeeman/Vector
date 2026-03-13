@@ -147,18 +147,6 @@ export function classifyReviewPriority(memory, now) {
     return 1;
   }
 
-  if (current.lastOutcome === "blocked") {
-    return 4;
-  }
-
-  if (current.lastOutcome === "continue") {
-    return 3;
-  }
-
-  if (current.lastOutcome === "mastered") {
-    return current.lastMasteryKind === "recovered" ? 2 : 1;
-  }
-
   return null;
 }
 

@@ -109,7 +109,7 @@ export function createTutorThreadHandler({
     });
 
     const masteryKind = normalizedEvaluation.outcome === "mastered"
-      ? (thread.blockedOnce ? "recovered" : "clean")
+      ? (sessionBoundThread.blockedOnce ? "recovered" : "clean")
       : undefined;
     const nextMemory = updateTopicMemory(
       currentMemory,
