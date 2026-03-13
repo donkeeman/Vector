@@ -274,6 +274,47 @@ test("sqlite store는 legacy blocked thread를 init 시 open으로 복구한다"
   }
 });
 
+test("sqlite store는 blocked status로 saveThread해도 open으로 정규화해 저장한다", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "vector-store-"));
+  const databasePath = join(tempDir, "blocked-normalize.sqlite");
+  const store = new SqliteStore({ databasePath });
+
+  try {
+    await store.init();
+    await store.saveThread({
+      slackThreadTs: "blocked.normalize.1",
+      topicId: "event-loop",
+      kind: "study",
+      mode: "evaluation",
+      status: "blocked",
+      openedAt: new Date("2026-03-11T10:00:00.000Z"),
+      closedAt: new Date("2026-03-11T10:02:00.000Z"),
+      lastCounterQuestionAt: null,
+      lastCounterQuestionResolvedAt: null,
+      blockedOnce: true,
+      codexSessionId: null,
+      directQaState: null,
+      lastAssistantPrompt: "event loop 설명해봐.",
+      lastChallengePrompt: "event loop 설명해봐.",
+    });
+
+    const thread = await store.getThread("blocked.normalize.1");
+    const rows = await execFileAsync("sqlite3", ["-json", databasePath, `
+      SELECT status, closed_at
+      FROM threads
+      WHERE slack_thread_ts = 'blocked.normalize.1';
+    `]);
+    const persisted = JSON.parse(rows.stdout)[0];
+
+    assert.equal(thread.status, "open");
+    assert.equal(thread.closedAt, null);
+    assert.equal(persisted.status, "open");
+    assert.equal(persisted.closed_at, null);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("sqlite store는 topic catalog를 저장/조회하고 last_used_at을 갱신한다", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "vector-store-"));
   const databasePath = join(tempDir, "topic-catalog.sqlite");

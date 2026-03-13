@@ -816,6 +816,89 @@ test("사용자가 명시적으로 막혔다고 하면 continue 평가여도 blo
   assert.equal(result.shouldScheduleNextQuestion, false);
 });
 
+test("사용자가 명시적으로 막혔다고 하면 mastered 평가여도 blocked teaching 상태로 유지한다", async () => {
+  const store = createInMemoryStore();
+  store.threads.set(
+    "111.334",
+    createThreadState({
+      slackThreadTs: "111.334",
+      topicId: "event-loop",
+      openedAt: new Date("2026-03-10T09:00:00+09:00"),
+    }),
+  );
+
+  const replies = [];
+  const llmCalls = [];
+  const bot = new TutorBot({
+    store,
+    topics: [
+      {
+        id: "event-loop",
+        title: "Event Loop",
+        category: "frontend",
+        promptSeed: "Explain the event loop.",
+        weight: 3,
+      },
+    ],
+    llmRunner: {
+      async runTask(type, payload) {
+        llmCalls.push({ type, payload });
+
+        if (type === "evaluate") {
+          return {
+            outcome: "mastered",
+            rationale: "충분히 정확하다.",
+            text: "흥, 이번엔 넘어간다.",
+          };
+        }
+
+        if (type === "teach") {
+          return {
+            text: "좋아, 개념부터 다시 붙자. 이벤트 루프는 task를 하나 처리한 뒤 microtask를 모두 비우고 렌더 기회를 본다.",
+            challengePrompt: "좋아, 다시. Promise.then이 setTimeout보다 먼저인 이유를 단계로 말해봐.",
+          };
+        }
+
+        throw new Error(`unexpected task: ${type}`);
+      },
+    },
+    slackClient: {
+      async postDirectMessage() {
+        throw new Error("should not be called");
+      },
+      async postThreadReply(threadTs, text) {
+        replies.push({ threadTs, text });
+        return { ok: true };
+      },
+    },
+  });
+
+  const result = await bot.handleThreadMessage({
+    threadTs: "111.334",
+    text: "나 잘 모르겠어.",
+    now: new Date("2026-03-10T09:06:00+09:00"),
+  });
+
+  assert.deepEqual(llmCalls.map(({ type }) => type), [
+    "evaluate",
+    "teach",
+  ]);
+  assert.deepEqual(replies, [
+    {
+      threadTs: "111.334",
+      text: "좋아, 개념부터 다시 붙자. 이벤트 루프는 task를 하나 처리한 뒤 microtask를 모두 비우고 렌더 기회를 본다.",
+    },
+    {
+      threadTs: "111.334",
+      text: "좋아, 다시. Promise.then이 setTimeout보다 먼저인 이유를 단계로 말해봐.",
+    },
+  ]);
+  assert.equal(result.thread.status, "open");
+  assert.equal(result.thread.blockedOnce, true);
+  assert.equal(store.attempts.at(-1)?.outcome, "blocked");
+  assert.equal(result.shouldScheduleNextQuestion, false);
+});
+
 test("counterquestion/teach/evaluate payload는 lastAssistantPrompt를 함께 넘긴다", async () => {
   const store = createInMemoryStore();
   store.threads.set(

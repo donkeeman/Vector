@@ -490,7 +490,7 @@ export class TutorBot {
 }
 
 function normalizeEvaluationResult(text, evaluation) {
-  if (evaluation.outcome === "continue" && looksExplicitlyStuckAnswer(text)) {
+  if (evaluation.outcome !== "blocked" && looksExplicitlyStuckAnswer(text)) {
     return {
       ...evaluation,
       outcome: "blocked",

@@ -151,6 +151,9 @@ export class SqliteStore {
   }
 
   async saveThread(thread) {
+    const normalizedStatus = normalizeThreadStatus(thread.status);
+    const normalizedClosedAt = normalizedStatus === "open" ? null : thread.closedAt;
+
     await this.#execute(`
       INSERT INTO threads (
         slack_thread_ts,
@@ -171,7 +174,7 @@ export class SqliteStore {
         ${toSqlString(thread.slackThreadTs)},
         ${toSqlString(toStoredTopicId(thread.topicId))},
         ${toSqlString(thread.kind ?? "study")},
-        ${toSqlString(thread.status)},
+        ${toSqlString(normalizedStatus)},
         ${toSqlString(thread.mode)},
         ${toSqlString(thread.codexSessionId)},
         ${toSqlString(thread.directQaState)},
@@ -179,7 +182,7 @@ export class SqliteStore {
         ${toSqlString(thread.lastChallengePrompt)},
         ${toSqlInteger(thread.blockedOnce)},
         ${toSqlDate(thread.openedAt)},
-        ${toSqlDate(thread.closedAt)},
+        ${toSqlDate(normalizedClosedAt)},
         ${toSqlDate(thread.lastCounterQuestionAt)},
         ${toSqlDate(thread.lastCounterQuestionResolvedAt)}
       )
@@ -414,11 +417,13 @@ function toSqlInteger(value) {
 }
 
 function mapThreadRow(row) {
+  const normalizedStatus = normalizeThreadStatus(row.status);
+
   return {
     slackThreadTs: row.slack_thread_ts,
     topicId: fromStoredTopicId(row.topic_id),
     kind: row.kind ?? "study",
-    status: row.status,
+    status: normalizedStatus,
     mode: row.mode,
     codexSessionId: row.codex_session_id ?? null,
     directQaState: row.direct_qa_state ?? null,
@@ -426,10 +431,19 @@ function mapThreadRow(row) {
     lastChallengePrompt: row.last_challenge_prompt ?? null,
     blockedOnce: Number(row.blocked_once ?? 0) === 1,
     openedAt: new Date(row.opened_at),
-    closedAt: parseNullableDate(row.closed_at),
+    closedAt: normalizedStatus === "open" ? null : parseNullableDate(row.closed_at),
     lastCounterQuestionAt: parseNullableDate(row.last_counter_question_at),
     lastCounterQuestionResolvedAt: parseNullableDate(row.last_counter_question_resolved_at),
   };
+}
+
+function normalizeThreadStatus(status) {
+  // blocked는 "막힌 학습 상태"일 뿐 닫힌 스레드 상태가 아니므로 저장 단계에서 open으로 고정합니다.
+  if (status === "blocked") {
+    return "open";
+  }
+
+  return status;
 }
 
 function toStoredTopicId(topicId) {
