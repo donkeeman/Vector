@@ -123,6 +123,73 @@ test("DM 루트 !stop 명령은 세션을 멈추지만 Slack 답장은 남기지
   assert.deepEqual(router.slackClient.replies, []);
 });
 
+test("연속 제어 명령은 도착 순서대로 직렬 처리한다", async () => {
+  const calls = [];
+  let activeControls = 0;
+  let maxActiveControls = 0;
+  let releaseStop;
+  const stopGate = new Promise((resolve) => {
+    releaseStop = resolve;
+  });
+
+  const router = new SlackMessageRouter({
+    store: createStore(),
+    tutorBot: {
+      async applyControlCommand(command, now) {
+        activeControls += 1;
+        maxActiveControls = Math.max(maxActiveControls, activeControls);
+        calls.push(`enter:${command}`);
+
+        if (command === "stop") {
+          await stopGate;
+        }
+
+        calls.push(`exit:${command}`);
+        activeControls -= 1;
+        return { state: command === "start" ? "active" : "inactive", startedAt: now };
+      },
+      async handleThreadMessage() {
+        throw new Error("should not be called");
+      },
+    },
+    llmRunner: createUnusedLlmRunner(),
+    slackClient: createSlackClient(),
+    now: () => new Date("2026-03-11T17:00:00+09:00"),
+  });
+
+  const stopPromise = router.handleMessageEvent({
+    type: "message",
+    channel_type: "im",
+    channel: "D123",
+    user: "U123",
+    text: "!stop",
+    ts: "2000.1",
+  });
+  const startPromise = router.handleMessageEvent({
+    type: "message",
+    channel_type: "im",
+    channel: "D123",
+    user: "U123",
+    text: "!start",
+    ts: "2000.2",
+  });
+
+  await Promise.resolve();
+  assert.deepEqual(calls, ["enter:stop"]);
+  assert.equal(maxActiveControls, 1);
+
+  releaseStop();
+  await Promise.all([stopPromise, startPromise]);
+
+  assert.deepEqual(calls, [
+    "enter:stop",
+    "exit:stop",
+    "enter:start",
+    "exit:start",
+  ]);
+  assert.equal(maxActiveControls, 1);
+});
+
 test("inactive 상태의 DM 루트 일반 메시지는 조용히 무시한다", async () => {
   const llmCalls = [];
   const store = createStore();

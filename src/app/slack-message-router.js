@@ -40,6 +40,7 @@ export class SlackMessageRouter {
     this.onControlCommandApplied = onControlCommandApplied;
     this.onStudyThreadClosed = onStudyThreadClosed;
     this.logger = logger;
+    this.controlCommandInFlight = Promise.resolve();
   }
 
   async handleMessageEvent(event) {
@@ -75,8 +76,7 @@ export class SlackMessageRouter {
         command,
       });
       try {
-        const session = await this.tutorBot.applyControlCommand(command, this.now());
-        await this.onControlCommandApplied(command, session);
+        await this.#applyControlCommandInOrder(command);
       } catch (error) {
         this.onError(error, event);
       }
@@ -155,8 +155,7 @@ export class SlackMessageRouter {
         command,
       });
       try {
-        const session = await this.tutorBot.applyControlCommand(command, this.now());
-        await this.onControlCommandApplied(command, session);
+        await this.#applyControlCommandInOrder(command);
       } catch (error) {
         this.onError(error, event);
       }
@@ -310,6 +309,22 @@ export class SlackMessageRouter {
       text: assistantText,
       recordedAt: this.now(),
     });
+  }
+
+  async #applyControlCommandInOrder(command) {
+    const run = async () => {
+      const session = await this.tutorBot.applyControlCommand(command, this.now());
+      await this.onControlCommandApplied(command, session);
+      return session;
+    };
+
+    const pending = this.controlCommandInFlight.then(run, run);
+    this.controlCommandInFlight = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    return pending;
   }
 }
 

@@ -54,6 +54,7 @@ test("!start는 inactive 세션의 최근 stopped study 스레드 하나만 다�
       }),
       status: "stopped",
       closedAt: new Date("2026-03-11T10:01:00+09:00"),
+      lastUserReplyAt: new Date("2026-03-11T09:59:00+09:00"),
     },
   );
   store.threads.set(
@@ -97,6 +98,51 @@ test("!start는 inactive 세션의 최근 stopped study 스레드 하나만 다�
     {
       threadTs: "111.211",
       text: "머리가 어떻게 된 거 아냐? 아직 끝내지도 못한 스레드가 버젓이 남아있잖아. 하던 거나 마저 끝내고 와. 모른다고 적당히 뭉개고 새 질문으로 도망칠 생각은 꿈도 꾸지 마.",
+    },
+  ]);
+});
+
+test("!start는 stopped 상태의 무응답 study 스레드도 open으로 다시 열고 답변 유도 대사를 남긴다", async () => {
+  const store = createInMemoryStore();
+  store.session = createInactiveSession();
+  store.threads.set(
+    "111.215",
+    {
+      ...createThreadState({
+        slackThreadTs: "111.215",
+        topicId: "event-loop",
+        openedAt: new Date("2026-03-11T09:10:00+09:00"),
+      }),
+      status: "stopped",
+      closedAt: new Date("2026-03-11T10:00:00+09:00"),
+      lastUserReplyAt: null,
+    },
+  );
+
+  const replies = [];
+  const bot = new TutorBot({
+    store,
+    topics: [],
+    llmRunner: createUnusedLlmRunner(),
+    slackClient: {
+      async postDirectMessage() {
+        throw new Error("should not be called");
+      },
+      async postThreadReply(threadTs, text) {
+        replies.push({ threadTs, text });
+        return { ok: true };
+      },
+    },
+  });
+
+  await bot.handleControlInput("!start", new Date("2026-03-11T10:10:00+09:00"));
+
+  assert.equal(store.threads.get("111.215")?.status, "open");
+  assert.equal(store.threads.get("111.215")?.closedAt, null);
+  assert.deepEqual(replies, [
+    {
+      threadTs: "111.215",
+      text: "야, 아직 내 마지막 질문에 답도 안 했잖아. 새로 시작 버튼 누른다고 기록이 리셋되는 줄 알았어? 딴소리하지 말고 그 스레드에서 지금 바로 답해.",
     },
   ]);
 });
@@ -185,6 +231,52 @@ test("!start는 open study 스레드에 사용자 답변 이력이 있으면 기
   ]);
 });
 
+test("!start는 이전 답변 이력이 있어도 최신 질문 대기 상태면 답변 유도 대사를 남긴다", async () => {
+  const store = createInMemoryStore();
+  store.session = createInactiveSession();
+  store.threads.set(
+    "111.217",
+    {
+      ...createThreadState({
+        slackThreadTs: "111.217",
+        topicId: "event-loop",
+        openedAt: new Date("2026-03-11T09:10:00+09:00"),
+      }),
+      status: "stopped",
+      closedAt: new Date("2026-03-11T10:00:00+09:00"),
+      lastUserReplyAt: new Date("2026-03-11T09:20:00+09:00"),
+      awaitingUserReplyAt: new Date("2026-03-11T09:25:00+09:00"),
+    },
+  );
+
+  const replies = [];
+  const bot = new TutorBot({
+    store,
+    topics: [],
+    llmRunner: createUnusedLlmRunner(),
+    slackClient: {
+      async postDirectMessage() {
+        throw new Error("should not be called");
+      },
+      async postThreadReply(threadTs, text) {
+        replies.push({ threadTs, text });
+        return { ok: true };
+      },
+    },
+  });
+
+  await bot.handleControlInput("!start", new Date("2026-03-11T10:10:00+09:00"));
+
+  assert.equal(store.threads.get("111.217")?.status, "open");
+  assert.equal(store.threads.get("111.217")?.closedAt, null);
+  assert.deepEqual(replies, [
+    {
+      threadTs: "111.217",
+      text: "야, 아직 내 마지막 질문에 답도 안 했잖아. 새로 시작 버튼 누른다고 기록이 리셋되는 줄 알았어? 딴소리하지 말고 그 스레드에서 지금 바로 답해.",
+    },
+  ]);
+});
+
 test("!start는 이미 active 세션이면 상태를 다시 만들지 않는다", async () => {
   const store = createInMemoryStore();
   const startedAt = new Date("2026-03-11T09:05:00+09:00");
@@ -201,6 +293,97 @@ test("!start는 이미 active 세션이면 상태를 다시 만들지 않는다"
   assert.equal(nextSession.state, "active");
   assert.deepEqual(nextSession.startedAt, startedAt);
   assert.deepEqual(store.session, nextSession);
+});
+
+test("이미 active 세션이어도 열린 study가 없고 stopped 무응답 스레드가 있으면 !start로 즉시 유도 대사를 남긴다", async () => {
+  const store = createInMemoryStore();
+  const startedAt = new Date("2026-03-11T09:05:00+09:00");
+  store.session = createStartedSession(startedAt);
+  store.threads.set(
+    "111.218",
+    {
+      ...createThreadState({
+        slackThreadTs: "111.218",
+        topicId: "event-loop",
+        openedAt: new Date("2026-03-11T09:10:00+09:00"),
+      }),
+      status: "stopped",
+      closedAt: new Date("2026-03-11T10:00:00+09:00"),
+      lastUserReplyAt: null,
+    },
+  );
+
+  const replies = [];
+  const bot = new TutorBot({
+    store,
+    topics: [],
+    llmRunner: createUnusedLlmRunner(),
+    slackClient: {
+      async postDirectMessage() {
+        throw new Error("should not be called");
+      },
+      async postThreadReply(threadTs, text) {
+        replies.push({ threadTs, text });
+        return { ok: true };
+      },
+    },
+  });
+
+  const nextSession = await bot.handleControlInput("!start", new Date("2026-03-11T10:10:00+09:00"));
+
+  assert.equal(nextSession.state, "active");
+  assert.deepEqual(nextSession.startedAt, startedAt);
+  assert.equal(store.threads.get("111.218")?.status, "open");
+  assert.equal(store.threads.get("111.218")?.closedAt, null);
+  assert.deepEqual(replies, [
+    {
+      threadTs: "111.218",
+      text: "야, 아직 내 마지막 질문에 답도 안 했잖아. 새로 시작 버튼 누른다고 기록이 리셋되는 줄 알았어? 딴소리하지 말고 그 스레드에서 지금 바로 답해.",
+    },
+  ]);
+});
+
+test("연속 start 이벤트가 들어와도 무응답 study 스레드 유도 대사는 한 번만 보낸다", async () => {
+  const store = createInMemoryStore();
+  store.session = createInactiveSession();
+  store.threads.set(
+    "111.216",
+    {
+      ...createThreadState({
+        slackThreadTs: "111.216",
+        topicId: "event-loop",
+        openedAt: new Date("2026-03-11T09:10:00+09:00"),
+      }),
+      status: "stopped",
+      closedAt: new Date("2026-03-11T10:00:00+09:00"),
+      lastUserReplyAt: null,
+    },
+  );
+
+  const replies = [];
+  const bot = new TutorBot({
+    store,
+    topics: [],
+    llmRunner: createUnusedLlmRunner(),
+    slackClient: {
+      async postDirectMessage() {
+        throw new Error("should not be called");
+      },
+      async postThreadReply(threadTs, text) {
+        replies.push({ threadTs, text });
+        return { ok: true };
+      },
+    },
+  });
+
+  await bot.applyControlCommand("start", new Date("2026-03-11T10:10:00+09:00"));
+  await bot.applyControlCommand("start", new Date("2026-03-11T10:10:01+09:00"));
+
+  assert.equal(replies.length, 1);
+  assert.deepEqual(replies[0], {
+    threadTs: "111.216",
+    text: "야, 아직 내 마지막 질문에 답도 안 했잖아. 새로 시작 버튼 누른다고 기록이 리셋되는 줄 알았어? 딴소리하지 말고 그 스레드에서 지금 바로 답해.",
+  });
 });
 
 test("!stop는 active 세션을 inactive로 바꾸고 inactive 세션은 그대로 둔다", async () => {

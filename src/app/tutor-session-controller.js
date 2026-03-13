@@ -21,6 +21,7 @@ export function createTutorSessionController({
   async function applyControlCommand(command, now = new Date()) {
     const session = (await store.getSession()) ?? createInactiveSession();
     let nextSession = session;
+    const wasInactiveSession = session.state === "inactive";
 
     if (command === "start") {
       if (session.state === "inactive") {
@@ -42,14 +43,17 @@ export function createTutorSessionController({
     }
 
     if (command === "start") {
-      const resumedThread = await reopenLatestIncompleteStudyThread();
-
-      if (resumedThread) {
-        return nextSession;
-      }
-
       const openThreads = await store.listOpenThreads();
       const hasOpenStudyThread = openThreads.some((thread) => (thread.kind ?? "study") === "study");
+      const shouldAttemptResume = wasInactiveSession || !hasOpenStudyThread;
+
+      if (shouldAttemptResume) {
+        const resumedThread = await reopenLatestIncompleteStudyThread();
+
+        if (resumedThread) {
+          return nextSession;
+        }
+      }
 
       if (nextSession.state === "active" && hasOpenStudyThread === false) {
         try {
@@ -85,17 +89,28 @@ export function createTutorSessionController({
       return null;
     }
 
-    if (latestIncompleteStudyThread.status === "open" && !hasUserReply) {
+    const awaitingUserReply = isAwaitingLatestReply(latestIncompleteStudyThread, hasUserReply);
+    if (awaitingUserReply) {
+      const awaitingThread = latestIncompleteStudyThread.status === "open"
+        ? latestIncompleteStudyThread
+        : {
+          ...latestIncompleteStudyThread,
+          status: "open",
+          closedAt: null,
+        };
+      if (awaitingThread !== latestIncompleteStudyThread) {
+        await store.saveThread(awaitingThread);
+      }
       await slackClient.postThreadReply(
-        latestIncompleteStudyThread.slackThreadTs,
+        awaitingThread.slackThreadTs,
         AWAITING_FIRST_REPLY_THREAD_REPLY,
       );
       logger.debug("tutor_bot.start_resumed_thread", {
-        threadTs: latestIncompleteStudyThread.slackThreadTs,
-        topicId: latestIncompleteStudyThread.topicId,
+        threadTs: awaitingThread.slackThreadTs,
+        topicId: awaitingThread.topicId,
         reason: "awaiting_first_reply",
       });
-      return latestIncompleteStudyThread;
+      return awaitingThread;
     }
 
     const reopenedThread = {
@@ -131,4 +146,14 @@ export function createTutorSessionController({
     reopenLatestIncompleteStudyThread,
     closeOpenStudyThreadsAsStopped,
   };
+}
+
+function isAwaitingLatestReply(thread, hasUserReply) {
+  const awaitingAt = thread.awaitingUserReplyAt?.getTime() ?? null;
+  if (awaitingAt === null) {
+    return !hasUserReply;
+  }
+
+  const lastUserReplyAt = thread.lastUserReplyAt?.getTime() ?? null;
+  return lastUserReplyAt === null || lastUserReplyAt <= awaitingAt;
 }
