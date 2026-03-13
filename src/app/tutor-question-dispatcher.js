@@ -93,9 +93,17 @@ export function createTutorQuestionDispatcher({
     });
     lastDispatchedTopicId = topic.id;
     const topicMemory = memories.get(topic.id) ?? null;
+    const retrievalContext = await loadRetrievalContext({
+      topicId: topic.id,
+      topicMemory,
+    });
     const question = await llmRunner.runTask("question", {
       topic,
       topicMemory,
+      recentAttempts: retrievalContext.recentAttempts,
+      latestTeachingMemory: retrievalContext.latestTeachingMemory,
+      previousMisconceptionSummary: retrievalContext.previousMisconceptionSummary,
+      previousTeachingSummary: retrievalContext.previousTeachingSummary,
     });
     const message = await slackClient.postDirectMessage(question.text);
     const thread = createThreadState({
@@ -193,6 +201,30 @@ export function createTutorQuestionDispatcher({
     }
 
     return lastDispatchedTopicId ? [lastDispatchedTopicId] : [];
+  }
+
+  async function loadRetrievalContext({ topicId, topicMemory }) {
+    const recentAttempts = typeof store.listAttemptsByTopic === "function"
+      ? await store.listAttemptsByTopic(topicId, { limit: 5 })
+      : [];
+    const latestTeachingMemory = typeof store.getLatestTeachingMemory === "function"
+      ? await store.getLatestTeachingMemory(topicId)
+      : null;
+    const previousMisconceptionSummary =
+      topicMemory?.lastMisconceptionSummary
+      ?? recentAttempts.find((attempt) => attempt.misconceptionSummary)?.misconceptionSummary
+      ?? null;
+    const previousTeachingSummary =
+      latestTeachingMemory?.teachingSummary
+      ?? topicMemory?.lastTeachingSummary
+      ?? null;
+
+    return {
+      recentAttempts,
+      latestTeachingMemory,
+      previousMisconceptionSummary,
+      previousTeachingSummary,
+    };
   }
 
   return {

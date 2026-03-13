@@ -51,12 +51,23 @@ export function updateTopicMemory(memory, outcome, now, options = {}) {
   const masteryKind = nextLearningState === "mastered_recovered"
     ? "recovered"
     : "clean";
+  const hasMisconceptionSummary = typeof options.lastMisconceptionSummary === "string"
+    && options.lastMisconceptionSummary.trim().length > 0;
+  const hasTeachingSummary = typeof options.lastTeachingSummary === "string"
+    && options.lastTeachingSummary.trim().length > 0;
   const next = {
     ...current,
     learningState: nextLearningState,
     timesAsked: current.timesAsked + 1,
     attemptCount: current.attemptCount + 1,
     lastOutcome: outcome,
+    lastMisconceptionSummary: hasMisconceptionSummary
+      ? options.lastMisconceptionSummary.trim()
+      : current.lastMisconceptionSummary,
+    lastTeachingSummary: hasTeachingSummary
+      ? options.lastTeachingSummary.trim()
+      : current.lastTeachingSummary,
+    lastAskedAt: parseDateOrNull(options.lastAskedAt ?? current.lastAskedAt),
     lastAnsweredAt: now,
     nextReviewAt: scheduleReview(current, outcome, now, { masteryKind }),
   };

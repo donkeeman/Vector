@@ -71,12 +71,24 @@ export function createTutorThreadHandler({
       };
     }
 
+    const currentMemory =
+      (await store.getTopicMemory(thread.topicId)) ?? createEmptyTopicMemory();
+    const retrievalContext = await loadRetrievalContext({
+      store,
+      topicId: thread.topicId,
+      topicMemory: currentMemory,
+    });
     const evaluation = await llmRunner.runTask("evaluate", {
       thread,
       text,
       lastAssistantPrompt: thread.lastAssistantPrompt ?? null,
       lastChallengePrompt: getChallengePrompt(thread),
       codexSessionId: thread.codexSessionId ?? null,
+      topicMemory: currentMemory,
+      recentAttempts: retrievalContext.recentAttempts,
+      latestTeachingMemory: retrievalContext.latestTeachingMemory,
+      previousMisconceptionSummary: retrievalContext.previousMisconceptionSummary,
+      previousTeachingSummary: retrievalContext.previousTeachingSummary,
     });
     const normalizedEvaluation = normalizeEvaluationResult(text, evaluation);
     const sessionBoundThread = mergeCodexSessionId(thread, normalizedEvaluation.codexSessionId);
@@ -85,13 +97,14 @@ export function createTutorThreadHandler({
       threadTs,
       topicId: thread.topicId,
       answer: text,
+      answerSummary: normalizedEvaluation.answerSummary ?? null,
+      misconceptionSummary: normalizedEvaluation.misconceptionSummary ?? null,
+      attemptKind: normalizedEvaluation.attemptKind ?? "evaluation",
       outcome: normalizedEvaluation.outcome,
       recordedAt: now,
       rationale: normalizedEvaluation.rationale ?? null,
     });
 
-    const currentMemory =
-      (await store.getTopicMemory(thread.topicId)) ?? createEmptyTopicMemory();
     const masteryKind = normalizedEvaluation.outcome === "mastered"
       ? (thread.blockedOnce ? "recovered" : "clean")
       : undefined;
@@ -99,7 +112,10 @@ export function createTutorThreadHandler({
       currentMemory,
       normalizedEvaluation.outcome,
       now,
-      masteryKind ? { masteryKind } : {},
+      {
+        ...(masteryKind ? { masteryKind } : {}),
+        lastMisconceptionSummary: normalizedEvaluation.misconceptionSummary ?? null,
+      },
     );
     await store.saveTopicMemory(thread.topicId, nextMemory);
 
@@ -111,6 +127,11 @@ export function createTutorThreadHandler({
         lastAssistantPrompt: sessionBoundThread.lastAssistantPrompt ?? null,
         lastChallengePrompt: getChallengePrompt(sessionBoundThread),
         codexSessionId: sessionBoundThread.codexSessionId ?? null,
+        topicMemory: currentMemory,
+        recentAttempts: retrievalContext.recentAttempts,
+        latestTeachingMemory: retrievalContext.latestTeachingMemory,
+        previousMisconceptionSummary: retrievalContext.previousMisconceptionSummary,
+        previousTeachingSummary: retrievalContext.previousTeachingSummary,
       });
 
       await slackClient.postThreadReply(threadTs, followUp.text);
@@ -137,12 +158,38 @@ export function createTutorThreadHandler({
         lastAssistantPrompt: sessionBoundThread.lastAssistantPrompt ?? null,
         lastChallengePrompt: getChallengePrompt(sessionBoundThread),
         codexSessionId: sessionBoundThread.codexSessionId ?? null,
+        topicMemory: currentMemory,
+        recentAttempts: retrievalContext.recentAttempts,
+        latestTeachingMemory: retrievalContext.latestTeachingMemory,
+        previousMisconceptionSummary: retrievalContext.previousMisconceptionSummary,
+        previousTeachingSummary: retrievalContext.previousTeachingSummary,
       });
 
       const challengePrompt = normalizeChallengePrompt(
         teaching.challengePrompt,
         getChallengePrompt(sessionBoundThread),
       );
+      const teachingSummary = normalizeTextOrNull(teaching.teachingSummary ?? teaching.text);
+      const challengeSummary = normalizeTextOrNull(teaching.challengeSummary ?? challengePrompt);
+      const blockedMemory = teachingSummary
+        ? {
+          ...nextMemory,
+          lastTeachingSummary: teachingSummary,
+        }
+        : nextMemory;
+
+      if (typeof store.saveTeachingMemory === "function" && teachingSummary) {
+        await store.saveTeachingMemory({
+          topicId: thread.topicId,
+          threadTs,
+          teachingSummary,
+          challengeSummary,
+          createdAt: now,
+        });
+      }
+      if (blockedMemory !== nextMemory) {
+        await store.saveTopicMemory(thread.topicId, blockedMemory);
+      }
       await slackClient.postThreadReply(threadTs, teaching.text);
       if (challengePrompt && challengePrompt !== teaching.text) {
         await slackClient.postThreadReply(threadTs, challengePrompt);
@@ -160,7 +207,7 @@ export function createTutorThreadHandler({
       await store.saveThread(blockedThread);
       return {
         thread: blockedThread,
-        memory: nextMemory,
+        memory: blockedMemory,
         shouldScheduleNextQuestion: false,
       };
     }
@@ -245,4 +292,37 @@ function normalizeChallengePrompt(primary, fallback) {
 
   const fallbackText = typeof fallback === "string" ? fallback.trim() : "";
   return fallbackText || null;
+}
+
+function normalizeTextOrNull(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+  return normalized || null;
+}
+
+async function loadRetrievalContext({ store, topicId, topicMemory }) {
+  const recentAttempts = typeof store.listAttemptsByTopic === "function"
+    ? await store.listAttemptsByTopic(topicId, { limit: 5 })
+    : [];
+  const latestTeachingMemory = typeof store.getLatestTeachingMemory === "function"
+    ? await store.getLatestTeachingMemory(topicId)
+    : null;
+  const previousMisconceptionSummary =
+    topicMemory?.lastMisconceptionSummary
+    ?? recentAttempts.find((attempt) => attempt.misconceptionSummary)?.misconceptionSummary
+    ?? null;
+  const previousTeachingSummary =
+    latestTeachingMemory?.teachingSummary
+    ?? topicMemory?.lastTeachingSummary
+    ?? null;
+
+  return {
+    recentAttempts,
+    latestTeachingMemory,
+    previousMisconceptionSummary,
+    previousTeachingSummary,
+  };
 }
