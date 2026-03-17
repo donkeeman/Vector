@@ -246,18 +246,11 @@ function normalizeTopicMemory(memory) {
 
   const attemptCount = Number(memory.attemptCount ?? memory.timesAsked ?? 0);
   const timesAsked = Number(memory.timesAsked ?? attemptCount);
-  const timesBlocked = Number(memory.timesBlocked ?? memory.failureCount ?? 0);
-  const successCount = Number(memory.successCount ?? 0);
-  const timesMasteredRecovered = Number(
-    memory.timesMasteredRecovered
-      ?? (memory.lastMasteryKind === "recovered" ? successCount : 0),
-  );
+  const timesBlocked = Number(memory.timesBlocked ?? 0);
+  const timesMasteredRecovered = Number(memory.timesMasteredRecovered ?? 0);
   const timesRecovered = Number(memory.timesRecovered ?? timesMasteredRecovered);
-  const timesMasteredClean = Number(
-    memory.timesMasteredClean
-      ?? Math.max(0, successCount - timesMasteredRecovered),
-  );
-  const learningState = memory.learningState ?? inferLearningStateFromLegacy(memory);
+  const timesMasteredClean = Number(memory.timesMasteredClean ?? 0);
+  const learningState = memory.learningState ?? "new";
 
   return {
     learningState,
@@ -275,30 +268,6 @@ function normalizeTopicMemory(memory) {
     attemptCount,
     masteredStreak: Number(memory.masteredStreak ?? 0),
   };
-}
-
-function inferLearningStateFromLegacy(memory) {
-  if (memory.lastOutcome === "blocked") {
-    return "blocked";
-  }
-
-  if (memory.lastOutcome === "continue") {
-    return "fuzzy";
-  }
-
-  if (memory.lastOutcome === "mastered") {
-    const recoveredCount = Number(
-      memory.timesRecovered
-        ?? memory.timesMasteredRecovered
-        ?? (memory.lastMasteryKind === "recovered" ? memory.successCount ?? 0 : 0),
-    );
-    const blockedCount = Number(memory.timesBlocked ?? memory.failureCount ?? 0);
-    return (memory.lastMasteryKind === "recovered" || blockedCount > recoveredCount)
-      ? "mastered_recovered"
-      : "mastered_clean";
-  }
-
-  return "new";
 }
 
 function parseDateOrNull(value) {

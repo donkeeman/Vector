@@ -312,7 +312,37 @@ test("sqlite store는 topic catalog를 저장/조회하고 last_used_at을 갱�
   }
 });
 
-test("sqlite store는 last_mastery_kind가 없는 기존 topic_memory에도 마이그레이션을 적용한다", async () => {
+test("sqlite store는 topic_memory에서 legacy 컬럼 없는 structured 스키마를 사용한다", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "vector-store-"));
+  const databasePath = join(tempDir, "topic-memory-schema.sqlite");
+  const store = new SqliteStore({ databasePath });
+
+  try {
+    await store.init();
+
+    const { stdout } = await execFileAsync("sqlite3", ["-json", databasePath, `
+      PRAGMA table_info(topic_memory);
+    `]);
+    const columns = JSON.parse(stdout).map((column) => column.name);
+
+    assert.equal(columns.includes("mastery_score"), false);
+    assert.equal(columns.includes("success_count"), false);
+    assert.equal(columns.includes("failure_count"), false);
+    assert.equal(columns.includes("last_mastery_kind"), false);
+    assert.equal(columns.includes("learning_state"), true);
+    assert.equal(columns.includes("times_asked"), true);
+    assert.equal(columns.includes("times_blocked"), true);
+    assert.equal(columns.includes("times_recovered"), true);
+    assert.equal(columns.includes("times_mastered_clean"), true);
+    assert.equal(columns.includes("times_mastered_recovered"), true);
+    assert.equal(columns.includes("attempt_count"), true);
+    assert.equal(columns.includes("mastered_streak"), true);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("sqlite store는 legacy topic_memory를 structured 스키마로 재작성해 마이그레이션한다", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "vector-store-"));
   const databasePath = join(tempDir, "legacy-memory.sqlite");
   const store = new SqliteStore({ databasePath });
@@ -339,24 +369,43 @@ test("sqlite store는 last_mastery_kind가 없는 기존 topic_memory에도 마�
         last_counter_question_at TEXT,
         last_counter_question_resolved_at TEXT
       );
+      INSERT INTO topic_memory (
+        topic_id,
+        mastery_score,
+        attempt_count,
+        success_count,
+        failure_count,
+        last_outcome,
+        next_review_at,
+        mastered_streak
+      ) VALUES (
+        'cache',
+        0.5,
+        4,
+        1,
+        2,
+        'blocked',
+        '2026-03-13T01:00:00.000Z',
+        0
+      );
     `]);
 
     await store.init();
-    await store.saveTopicMemory("cache", {
-      learningState: "fuzzy",
-      timesAsked: 2,
-      timesBlocked: 1,
-      timesRecovered: 0,
-      timesMasteredClean: 1,
-      timesMasteredRecovered: 0,
-      lastOutcome: "continue",
-      nextReviewAt: null,
-      masteredStreak: 0,
-    });
 
     const memory = await store.getTopicMemory("cache");
-    assert.equal(memory.learningState, "fuzzy");
-    assert.equal("lastMasteryKind" in memory, false);
+    const { stdout } = await execFileAsync("sqlite3", ["-json", databasePath, `
+      PRAGMA table_info(topic_memory);
+    `]);
+    const columns = JSON.parse(stdout).map((column) => column.name);
+
+    assert.equal(columns.includes("mastery_score"), false);
+    assert.equal(columns.includes("success_count"), false);
+    assert.equal(columns.includes("failure_count"), false);
+    assert.equal(columns.includes("last_mastery_kind"), false);
+    assert.equal(memory.learningState, "blocked");
+    assert.equal(memory.timesAsked, 4);
+    assert.equal(memory.timesBlocked, 2);
+    assert.equal(memory.attemptCount, 4);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

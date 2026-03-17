@@ -36,14 +36,10 @@ export class SqliteStore {
         last_teaching_summary TEXT,
         last_asked_at TEXT,
         last_answered_at TEXT,
-        mastery_score REAL NOT NULL,
-        attempt_count INTEGER NOT NULL,
-        success_count INTEGER NOT NULL,
-        failure_count INTEGER NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
         last_outcome TEXT,
-        last_mastery_kind TEXT,
         next_review_at TEXT,
-        mastered_streak INTEGER NOT NULL
+        mastered_streak INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS topic_catalog (
@@ -107,6 +103,7 @@ export class SqliteStore {
       );
     `);
 
+    await this.#migrateTopicMemoryTableIfNeeded();
     await this.#ensureThreadColumns();
     await this.#ensureTopicMemoryColumns();
     await this.#ensureAttemptColumns();
@@ -346,12 +343,8 @@ export class SqliteStore {
         last_teaching_summary,
         last_asked_at,
         last_answered_at,
-        mastery_score,
         attempt_count,
-        success_count,
-        failure_count,
         last_outcome,
-        last_mastery_kind,
         next_review_at,
         mastered_streak
       ) VALUES (
@@ -366,12 +359,8 @@ export class SqliteStore {
         ${toSqlString(normalized.lastTeachingSummary)},
         ${toSqlDate(normalized.lastAskedAt)},
         ${toSqlDate(normalized.lastAnsweredAt)},
-        ${normalized.masteryScore},
         ${normalized.attemptCount},
-        ${normalized.successCount},
-        ${normalized.failureCount},
         ${toSqlString(normalized.lastOutcome)},
-        ${toSqlString(normalized.lastMasteryKind)},
         ${toSqlDate(normalized.nextReviewAt)},
         ${normalized.masteredStreak}
       )
@@ -386,12 +375,8 @@ export class SqliteStore {
         last_teaching_summary = excluded.last_teaching_summary,
         last_asked_at = excluded.last_asked_at,
         last_answered_at = excluded.last_answered_at,
-        mastery_score = excluded.mastery_score,
         attempt_count = excluded.attempt_count,
-        success_count = excluded.success_count,
-        failure_count = excluded.failure_count,
         last_outcome = excluded.last_outcome,
-        last_mastery_kind = excluded.last_mastery_kind,
         next_review_at = excluded.next_review_at,
         mastered_streak = excluded.mastered_streak;
     `);
@@ -531,7 +516,10 @@ export class SqliteStore {
     await this.#ensureColumn("topic_memory", columns, "last_teaching_summary", "TEXT");
     await this.#ensureColumn("topic_memory", columns, "last_asked_at", "TEXT");
     await this.#ensureColumn("topic_memory", columns, "last_answered_at", "TEXT");
-    await this.#ensureColumn("topic_memory", columns, "last_mastery_kind", "TEXT");
+    await this.#ensureColumn("topic_memory", columns, "attempt_count", "INTEGER NOT NULL DEFAULT 0");
+    await this.#ensureColumn("topic_memory", columns, "last_outcome", "TEXT");
+    await this.#ensureColumn("topic_memory", columns, "next_review_at", "TEXT");
+    await this.#ensureColumn("topic_memory", columns, "mastered_streak", "INTEGER NOT NULL DEFAULT 0");
   }
 
   async #ensureAttemptColumns() {
@@ -547,6 +535,54 @@ export class SqliteStore {
     if (!hasColumn) {
       await this.#execute(`ALTER TABLE ${tableName} ADD COLUMN ${name} ${definition};`);
     }
+  }
+
+  async #migrateTopicMemoryTableIfNeeded() {
+    const columns = await this.#query("PRAGMA table_info(topic_memory);");
+    const columnNames = new Set(columns.map((column) => column.name));
+    const hasLegacyColumns = [
+      "mastery_score",
+      "success_count",
+      "failure_count",
+      "last_mastery_kind",
+    ].some((name) => columnNames.has(name));
+
+    if (!hasLegacyColumns) {
+      return;
+    }
+
+    const legacyRows = await this.#query("SELECT * FROM topic_memory;");
+    const migratedRows = legacyRows.map((row) => ({
+      topicId: row.topic_id,
+      memory: mapLegacyMemoryRowForMigration(row),
+    }));
+
+    await this.#execute(`
+      ALTER TABLE topic_memory RENAME TO topic_memory_legacy_backup;
+      CREATE TABLE topic_memory (
+        topic_id TEXT PRIMARY KEY,
+        learning_state TEXT NOT NULL DEFAULT 'new',
+        times_asked INTEGER NOT NULL DEFAULT 0,
+        times_blocked INTEGER NOT NULL DEFAULT 0,
+        times_recovered INTEGER NOT NULL DEFAULT 0,
+        times_mastered_clean INTEGER NOT NULL DEFAULT 0,
+        times_mastered_recovered INTEGER NOT NULL DEFAULT 0,
+        last_misconception_summary TEXT,
+        last_teaching_summary TEXT,
+        last_asked_at TEXT,
+        last_answered_at TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_outcome TEXT,
+        next_review_at TEXT,
+        mastered_streak INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+
+    for (const row of migratedRows) {
+      await this.saveTopicMemory(row.topicId, row.memory);
+    }
+
+    await this.#execute("DROP TABLE topic_memory_legacy_backup;");
   }
 }
 
@@ -620,30 +656,18 @@ function fromStoredTopicId(topicId) {
 }
 
 function mapMemoryRow(row) {
-  const legacySuccessCount = Number(row.success_count ?? 0);
-  const timesMasteredRecovered = Number(
-    row.times_mastered_recovered
-      ?? (row.last_mastery_kind === "recovered" ? legacySuccessCount : 0),
-  );
-
   return {
-    learningState: row.learning_state ?? inferLearningStateFromLegacyRow(row),
-    timesAsked: Number(row.times_asked ?? row.attempt_count ?? 0),
-    timesBlocked: Number(row.times_blocked ?? row.failure_count ?? 0),
-    timesRecovered: Number(
-      row.times_recovered
-        ?? timesMasteredRecovered,
-    ),
-    timesMasteredClean: Number(
-      row.times_mastered_clean
-        ?? Math.max(0, legacySuccessCount - timesMasteredRecovered),
-    ),
-    timesMasteredRecovered,
+    learningState: row.learning_state ?? "new",
+    timesAsked: Number(row.times_asked ?? 0),
+    timesBlocked: Number(row.times_blocked ?? 0),
+    timesRecovered: Number(row.times_recovered ?? 0),
+    timesMasteredClean: Number(row.times_mastered_clean ?? 0),
+    timesMasteredRecovered: Number(row.times_mastered_recovered ?? 0),
     lastMisconceptionSummary: row.last_misconception_summary ?? null,
     lastTeachingSummary: row.last_teaching_summary ?? null,
     lastAskedAt: parseNullableDate(row.last_asked_at),
     lastAnsweredAt: parseNullableDate(row.last_answered_at),
-    attemptCount: Number(row.attempt_count ?? row.times_asked ?? 0),
+    attemptCount: Number(row.attempt_count ?? 0),
     lastOutcome: row.last_outcome,
     nextReviewAt: parseNullableDate(row.next_review_at),
     masteredStreak: Number(row.mastered_streak ?? 0),
@@ -662,7 +686,64 @@ function mapTopicRow(row) {
   };
 }
 
+function normalizeMemoryForPersistence(memory = {}) {
+  const timesAsked = Number(memory.timesAsked ?? memory.attemptCount ?? 0);
+  const attemptCount = Number(memory.attemptCount ?? timesAsked);
+
+  return {
+    learningState: memory.learningState ?? "new",
+    timesAsked,
+    timesBlocked: Number(memory.timesBlocked ?? 0),
+    timesRecovered: Number(memory.timesRecovered ?? 0),
+    timesMasteredClean: Number(memory.timesMasteredClean ?? 0),
+    timesMasteredRecovered: Number(memory.timesMasteredRecovered ?? 0),
+    lastMisconceptionSummary: memory.lastMisconceptionSummary ?? null,
+    lastTeachingSummary: memory.lastTeachingSummary ?? null,
+    lastAskedAt: memory.lastAskedAt ?? null,
+    lastAnsweredAt: memory.lastAnsweredAt ?? null,
+    attemptCount,
+    lastOutcome: memory.lastOutcome ?? null,
+    nextReviewAt: memory.nextReviewAt ?? null,
+    masteredStreak: Number(memory.masteredStreak ?? 0),
+  };
+}
+
+function mapLegacyMemoryRowForMigration(row) {
+  const legacySuccessCount = Number(row.success_count ?? 0);
+  const timesMasteredRecovered = Number(
+    row.times_mastered_recovered
+      ?? (row.last_mastery_kind === "recovered" ? legacySuccessCount : 0),
+  );
+
+  return {
+    learningState: inferLearningStateFromLegacyRow(row),
+    timesAsked: Number(row.times_asked ?? row.attempt_count ?? 0),
+    timesBlocked: Number(row.times_blocked ?? row.failure_count ?? 0),
+    timesRecovered: Number(
+      row.times_recovered
+      ?? timesMasteredRecovered,
+    ),
+    timesMasteredClean: Number(
+      row.times_mastered_clean
+      ?? Math.max(0, legacySuccessCount - timesMasteredRecovered),
+    ),
+    timesMasteredRecovered,
+    lastMisconceptionSummary: row.last_misconception_summary ?? null,
+    lastTeachingSummary: row.last_teaching_summary ?? null,
+    lastAskedAt: parseNullableDate(row.last_asked_at),
+    lastAnsweredAt: parseNullableDate(row.last_answered_at),
+    attemptCount: Number(row.attempt_count ?? row.times_asked ?? 0),
+    lastOutcome: row.last_outcome ?? null,
+    nextReviewAt: parseNullableDate(row.next_review_at),
+    masteredStreak: Number(row.mastered_streak ?? 0),
+  };
+}
+
 function inferLearningStateFromLegacyRow(row) {
+  if (row.learning_state) {
+    return row.learning_state;
+  }
+
   if (row.last_outcome === "blocked") {
     return "blocked";
   }
@@ -673,78 +754,6 @@ function inferLearningStateFromLegacyRow(row) {
 
   if (row.last_outcome === "mastered") {
     return row.last_mastery_kind === "recovered"
-      ? "mastered_recovered"
-      : "mastered_clean";
-  }
-
-  return "new";
-}
-
-function normalizeMemoryForPersistence(memory = {}) {
-  const successCount = Number(
-    memory.successCount
-      ?? Number(memory.timesMasteredClean ?? 0) + Number(memory.timesMasteredRecovered ?? 0),
-  );
-  const timesMasteredRecovered = Number(
-    memory.timesMasteredRecovered
-      ?? (memory.lastMasteryKind === "recovered" ? successCount : 0),
-  );
-  const timesMasteredClean = Number(
-    memory.timesMasteredClean ?? Math.max(0, successCount - timesMasteredRecovered),
-  );
-  const attemptCount = Number(memory.attemptCount ?? memory.timesAsked ?? 0);
-  const failureCount = Number(memory.failureCount ?? memory.timesBlocked ?? 0);
-  const lastMasteryKind = resolveLastMasteryKind(memory);
-
-  return {
-    learningState: memory.learningState ?? inferLearningStateFromLegacyValue(memory),
-    timesAsked: Number(memory.timesAsked ?? attemptCount),
-    timesBlocked: Number(memory.timesBlocked ?? failureCount),
-    timesRecovered: Number(memory.timesRecovered ?? timesMasteredRecovered),
-    timesMasteredClean,
-    timesMasteredRecovered,
-    lastMisconceptionSummary: memory.lastMisconceptionSummary ?? null,
-    lastTeachingSummary: memory.lastTeachingSummary ?? null,
-    lastAskedAt: memory.lastAskedAt ?? null,
-    lastAnsweredAt: memory.lastAnsweredAt ?? null,
-    masteryScore: Number(memory.masteryScore ?? 0),
-    attemptCount,
-    successCount,
-    failureCount,
-    lastOutcome: memory.lastOutcome ?? null,
-    lastMasteryKind,
-    nextReviewAt: memory.nextReviewAt ?? null,
-    masteredStreak: Number(memory.masteredStreak ?? 0),
-  };
-}
-
-function resolveLastMasteryKind(memory) {
-  if (memory.lastMasteryKind === "recovered" || memory.lastMasteryKind === "clean") {
-    return memory.lastMasteryKind;
-  }
-
-  if (memory.learningState === "mastered_recovered") {
-    return "recovered";
-  }
-
-  if (memory.learningState === "mastered_clean") {
-    return "clean";
-  }
-
-  return null;
-}
-
-function inferLearningStateFromLegacyValue(memory) {
-  if (memory.lastOutcome === "blocked") {
-    return "blocked";
-  }
-
-  if (memory.lastOutcome === "continue") {
-    return "fuzzy";
-  }
-
-  if (memory.lastOutcome === "mastered") {
-    return memory.lastMasteryKind === "recovered"
       ? "mastered_recovered"
       : "mastered_clean";
   }
