@@ -215,31 +215,6 @@ export function pickReviewTopic({ now, topics, memories }) {
   return candidates[0]?.topic ?? null;
 }
 
-export function pickNextTopic({ now, topics, memories }) {
-  const memoryMap = memories instanceof Map ? memories : new Map();
-  const reviewTopic = pickReviewTopic({
-    now,
-    topics,
-    memories: memoryMap,
-  });
-  if (reviewTopic) {
-    return reviewTopic;
-  }
-
-  const newTopics = topics
-    .filter((topic) => classifyTopicLane(memoryMap.get(topic.id) ?? null) === "new")
-    .sort((left, right) => {
-      const leftWeight = Math.max(1, left.weight ?? 1);
-      const rightWeight = Math.max(1, right.weight ?? 1);
-      if (rightWeight !== leftWeight) {
-        return rightWeight - leftWeight;
-      }
-      return left.id.localeCompare(right.id);
-    });
-
-  return newTopics[0] ?? null;
-}
-
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
