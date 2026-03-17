@@ -52,6 +52,9 @@ export class SlackMessageRouter {
         channelType: event?.channel_type ?? null,
         subtype: event?.subtype ?? null,
         botId: event?.bot_id ?? null,
+        hasClientMsgId:
+          typeof event?.client_msg_id === "string"
+          && Boolean(event.client_msg_id.trim()),
         hasText: typeof event?.text === "string" && Boolean(event.text.trim()),
         hasThreadTs: Boolean(event?.thread_ts),
         user: event?.user ?? null,
@@ -329,14 +332,19 @@ export class SlackMessageRouter {
 }
 
 function shouldHandleMessageEvent(event) {
+  const hasText = typeof event?.text === "string" && Boolean(event.text.trim());
+  const hasClientMsgId =
+    typeof event?.client_msg_id === "string"
+    && Boolean(event.client_msg_id.trim());
+  const isLikelyBotEcho = Boolean(event?.bot_id) && !hasClientMsgId;
+
   return Boolean(
     event
       && event.type === "message"
       && event.channel_type === "im"
-      && !event.bot_id
       && !event.subtype
-      && typeof event.text === "string"
-      && event.text.trim(),
+      && hasText
+      && !isLikelyBotEcho,
   );
 }
 
