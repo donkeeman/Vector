@@ -19,11 +19,7 @@ export function createEmptyTopicMemory() {
     lastAnsweredAt: null,
     lastOutcome: null,
     nextReviewAt: null,
-    masteryScore: 0,
     attemptCount: 0,
-    successCount: 0,
-    failureCount: 0,
-    lastMasteryKind: null,
     masteredStreak: 0,
   };
 }
@@ -78,9 +74,6 @@ export function updateTopicMemory(memory, outcome, now, options = {}) {
   };
 
   if (outcome === "mastered") {
-    next.masteryScore = clamp(current.masteryScore + 0.35, 0, 1);
-    next.successCount = current.successCount + 1;
-    next.lastMasteryKind = masteryKind;
     if (nextLearningState === "mastered_recovered") {
       next.timesRecovered = current.timesRecovered + 1;
       next.timesMasteredRecovered = current.timesMasteredRecovered + 1;
@@ -94,17 +87,12 @@ export function updateTopicMemory(memory, outcome, now, options = {}) {
   }
 
   if (outcome === "blocked") {
-    next.masteryScore = clamp(current.masteryScore - 0.3, 0, 1);
-    next.failureCount = current.failureCount + 1;
     next.timesBlocked = current.timesBlocked + 1;
     next.masteredStreak = 0;
-    next.lastMasteryKind = null;
     return next;
   }
 
-  next.masteryScore = clamp(current.masteryScore + 0.05, 0, 1);
   next.masteredStreak = 0;
-  next.lastMasteryKind = null;
   return next;
 }
 
@@ -215,10 +203,6 @@ export function pickReviewTopic({ now, topics, memories }) {
   return candidates[0]?.topic ?? null;
 }
 
-function clamp(value, min, max) {
-  return Math.min(Math.max(value, min), max);
-}
-
 function masteryDaysForStreak(streak) {
   return Math.min(7 * 2 ** (streak - 1), 30);
 }
@@ -260,37 +244,36 @@ function normalizeTopicMemory(memory) {
     return createEmptyTopicMemory();
   }
 
-  const base = createEmptyTopicMemory();
-  const timesAsked = Number(memory.timesAsked ?? memory.attemptCount ?? 0);
+  const attemptCount = Number(memory.attemptCount ?? memory.timesAsked ?? 0);
+  const timesAsked = Number(memory.timesAsked ?? attemptCount);
   const timesBlocked = Number(memory.timesBlocked ?? memory.failureCount ?? 0);
+  const successCount = Number(memory.successCount ?? 0);
   const timesMasteredRecovered = Number(
     memory.timesMasteredRecovered
-      ?? (memory.lastMasteryKind === "recovered" ? memory.successCount ?? 0 : 0),
+      ?? (memory.lastMasteryKind === "recovered" ? successCount : 0),
   );
   const timesRecovered = Number(memory.timesRecovered ?? timesMasteredRecovered);
   const timesMasteredClean = Number(
     memory.timesMasteredClean
-      ?? Math.max(0, Number(memory.successCount ?? 0) - timesMasteredRecovered),
+      ?? Math.max(0, successCount - timesMasteredRecovered),
   );
   const learningState = memory.learningState ?? inferLearningStateFromLegacy(memory);
 
   return {
-    ...base,
-    ...memory,
     learningState,
     timesAsked,
     timesBlocked,
     timesRecovered,
     timesMasteredClean,
     timesMasteredRecovered,
+    lastMisconceptionSummary: memory.lastMisconceptionSummary ?? null,
+    lastTeachingSummary: memory.lastTeachingSummary ?? null,
     lastAskedAt: parseDateOrNull(memory.lastAskedAt),
     lastAnsweredAt: parseDateOrNull(memory.lastAnsweredAt),
+    lastOutcome: memory.lastOutcome ?? null,
     nextReviewAt: parseDateOrNull(memory.nextReviewAt),
-    attemptCount: Number(memory.attemptCount ?? timesAsked),
-    successCount: Number(memory.successCount ?? (timesMasteredClean + timesMasteredRecovered)),
-    failureCount: Number(memory.failureCount ?? timesBlocked),
+    attemptCount,
     masteredStreak: Number(memory.masteredStreak ?? 0),
-    masteryScore: Number(memory.masteryScore ?? 0),
   };
 }
 
@@ -304,7 +287,13 @@ function inferLearningStateFromLegacy(memory) {
   }
 
   if (memory.lastOutcome === "mastered") {
-    return memory.lastMasteryKind === "recovered"
+    const recoveredCount = Number(
+      memory.timesRecovered
+        ?? memory.timesMasteredRecovered
+        ?? (memory.lastMasteryKind === "recovered" ? memory.successCount ?? 0 : 0),
+    );
+    const blockedCount = Number(memory.timesBlocked ?? memory.failureCount ?? 0);
+    return (memory.lastMasteryKind === "recovered" || blockedCount > recoveredCount)
       ? "mastered_recovered"
       : "mastered_clean";
   }

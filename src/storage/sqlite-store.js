@@ -620,41 +620,33 @@ function fromStoredTopicId(topicId) {
 }
 
 function mapMemoryRow(row) {
+  const legacySuccessCount = Number(row.success_count ?? 0);
+  const timesMasteredRecovered = Number(
+    row.times_mastered_recovered
+      ?? (row.last_mastery_kind === "recovered" ? legacySuccessCount : 0),
+  );
+
   return {
     learningState: row.learning_state ?? inferLearningStateFromLegacyRow(row),
     timesAsked: Number(row.times_asked ?? row.attempt_count ?? 0),
     timesBlocked: Number(row.times_blocked ?? row.failure_count ?? 0),
     timesRecovered: Number(
       row.times_recovered
-        ?? row.times_mastered_recovered
-        ?? (row.last_mastery_kind === "recovered" ? row.success_count ?? 0 : 0),
+        ?? timesMasteredRecovered,
     ),
     timesMasteredClean: Number(
       row.times_mastered_clean
-        ?? Math.max(
-          0,
-          Number(row.success_count ?? 0) - Number(
-            row.times_mastered_recovered
-              ?? (row.last_mastery_kind === "recovered" ? row.success_count ?? 0 : 0),
-          ),
-        ),
+        ?? Math.max(0, legacySuccessCount - timesMasteredRecovered),
     ),
-    timesMasteredRecovered: Number(
-      row.times_mastered_recovered
-        ?? (row.last_mastery_kind === "recovered" ? row.success_count ?? 0 : 0),
-    ),
+    timesMasteredRecovered,
     lastMisconceptionSummary: row.last_misconception_summary ?? null,
     lastTeachingSummary: row.last_teaching_summary ?? null,
     lastAskedAt: parseNullableDate(row.last_asked_at),
     lastAnsweredAt: parseNullableDate(row.last_answered_at),
-    masteryScore: row.mastery_score,
-    attemptCount: row.attempt_count,
-    successCount: row.success_count,
-    failureCount: row.failure_count,
+    attemptCount: Number(row.attempt_count ?? row.times_asked ?? 0),
     lastOutcome: row.last_outcome,
-    lastMasteryKind: row.last_mastery_kind ?? null,
     nextReviewAt: parseNullableDate(row.next_review_at),
-    masteredStreak: row.mastered_streak,
+    masteredStreak: Number(row.mastered_streak ?? 0),
   };
 }
 
@@ -689,7 +681,10 @@ function inferLearningStateFromLegacyRow(row) {
 }
 
 function normalizeMemoryForPersistence(memory = {}) {
-  const successCount = Number(memory.successCount ?? 0);
+  const successCount = Number(
+    memory.successCount
+      ?? Number(memory.timesMasteredClean ?? 0) + Number(memory.timesMasteredRecovered ?? 0),
+  );
   const timesMasteredRecovered = Number(
     memory.timesMasteredRecovered
       ?? (memory.lastMasteryKind === "recovered" ? successCount : 0),
@@ -699,6 +694,7 @@ function normalizeMemoryForPersistence(memory = {}) {
   );
   const attemptCount = Number(memory.attemptCount ?? memory.timesAsked ?? 0);
   const failureCount = Number(memory.failureCount ?? memory.timesBlocked ?? 0);
+  const lastMasteryKind = resolveLastMasteryKind(memory);
 
   return {
     learningState: memory.learningState ?? inferLearningStateFromLegacyValue(memory),
@@ -716,10 +712,26 @@ function normalizeMemoryForPersistence(memory = {}) {
     successCount,
     failureCount,
     lastOutcome: memory.lastOutcome ?? null,
-    lastMasteryKind: memory.lastMasteryKind ?? null,
+    lastMasteryKind,
     nextReviewAt: memory.nextReviewAt ?? null,
     masteredStreak: Number(memory.masteredStreak ?? 0),
   };
+}
+
+function resolveLastMasteryKind(memory) {
+  if (memory.lastMasteryKind === "recovered" || memory.lastMasteryKind === "clean") {
+    return memory.lastMasteryKind;
+  }
+
+  if (memory.learningState === "mastered_recovered") {
+    return "recovered";
+  }
+
+  if (memory.learningState === "mastered_clean") {
+    return "clean";
+  }
+
+  return null;
 }
 
 function inferLearningStateFromLegacyValue(memory) {

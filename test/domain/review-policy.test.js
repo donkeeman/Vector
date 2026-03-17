@@ -25,6 +25,10 @@ test("createEmptyTopicMemory는 structured memory 기본 shape를 가진다", ()
   assert.equal(memory.lastAnsweredAt, null);
   assert.equal(memory.lastOutcome, null);
   assert.equal(memory.nextReviewAt, null);
+  assert.equal("masteryScore" in memory, false);
+  assert.equal("successCount" in memory, false);
+  assert.equal("failureCount" in memory, false);
+  assert.equal("lastMasteryKind" in memory, false);
 });
 
 test("outcome 전이에 따라 learningState가 계산된다", () => {
@@ -34,6 +38,10 @@ test("outcome 전이에 따라 learningState가 계산된다", () => {
   const firstSuccess = updateTopicMemory(empty, "mastered", now);
   assert.equal(firstSuccess.learningState, "mastered_clean");
   assert.equal(firstSuccess.timesMasteredClean, 1);
+  assert.equal("masteryScore" in firstSuccess, false);
+  assert.equal("successCount" in firstSuccess, false);
+  assert.equal("failureCount" in firstSuccess, false);
+  assert.equal("lastMasteryKind" in firstSuccess, false);
 
   const blocked = updateTopicMemory(empty, "blocked", now);
   assert.equal(blocked.learningState, "blocked");
