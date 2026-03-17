@@ -9,8 +9,6 @@ import {
   updateTopicMemory,
 } from "../domain/topic-memory.js";
 
-const CLEAN_MASTERY_STATUS_REPLY = "...뭐야? 이걸 한 번에 이렇게 다 대답한다고? ...너 어디서 미리 답안지라도 외워왔어? 하, 착각하지 마. 이번 건 워낙 기초적인 거라 나도 대충 넘어가는 거니까. 우쭐대지 마. 다음엔 진짜 네 한계를 박살 내줄 테니까.";
-const RECOVERED_MASTERY_STATUS_REPLY = "이제야 겨우 알아듣네. 거봐, 내가 제대로 짚어주지 않았으면 넌 평생 그 얕은 논리에서 허우적대고 있었을 거 아냐. 넌 나 없으면 어떡할 뻔했냐? 오늘 내가 가르쳐준 거 머릿속에 꽉 박아둬. 잊어버리면 가만 안 둬.";
 const NOOP_LOGGER = {
   debug() {},
   error() {},
@@ -217,12 +215,9 @@ export function createTutorThreadHandler({
       };
     }
 
-    const reply = normalizedEvaluation.text ?? "흥, 이번엔 넘어간다. 다음엔 더 깊게 물어볼 거야.";
+    const reply = normalizeTextOrNull(normalizedEvaluation.text)
+      ?? "흥, 이번엔 넘어간다. 다음엔 더 깊게 물어볼 거야.";
     await slackClient.postThreadReply(threadTs, reply);
-    await slackClient.postThreadReply(
-      threadTs,
-      masteryKind === "recovered" ? RECOVERED_MASTERY_STATUS_REPLY : CLEAN_MASTERY_STATUS_REPLY,
-    );
     const closedThread = closeThread(sessionBoundThread, "mastered", now);
     await store.saveThread(closedThread);
     return {
