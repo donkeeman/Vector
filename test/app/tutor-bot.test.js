@@ -972,6 +972,102 @@ test("열린 study 스레드가 무응답 상태로 오래 열려 있으면 새 
   assert.equal(replies.length, 1);
 });
 
+test("awaiting_user_reply_at가 비어 있어도 열린 study 스레드는 openedAt 기준으로 재촉한다", async () => {
+  const store = createInMemoryStore();
+  store.session = createStartedSession(new Date("2026-03-10T09:00:00+09:00"));
+  store.threads.set(
+    "111.993",
+    {
+      ...createThreadState({
+        slackThreadTs: "111.993",
+        topicId: "event-loop",
+        openedAt: new Date("2026-03-10T09:00:00+09:00"),
+      }),
+      awaitingUserReplyAt: null,
+      lastUserReplyAt: null,
+      reminderSentAt: null,
+    },
+  );
+
+  const replies = [];
+  const bot = new TutorBot({
+    store,
+    topics: [],
+    llmRunner: createUnusedLlmRunner(),
+    slackClient: {
+      async postDirectMessage() {
+        throw new Error("should not be called");
+      },
+      async postThreadReply(threadTs, text) {
+        replies.push({ threadTs, text });
+        return { ok: true };
+      },
+    },
+  });
+
+  await bot.dispatchNextQuestion(new Date("2026-03-10T09:03:00+09:00"));
+
+  assert.deepEqual(replies, [
+    {
+      threadTs: "111.993",
+      text: "야, 아직 답 안 했잖아. 같은 질문에서 또 도망치지 말고 지금 스레드에서 바로 답해.",
+    },
+  ]);
+  assert.equal(
+    store.threads.get("111.993")?.awaitingUserReplyAt?.toISOString(),
+    "2026-03-10T00:00:00.000Z",
+  );
+});
+
+test("awaiting_user_reply_at가 비어 있고 마지막 사용자 답변이 있으면 lastUserReplyAt 기준으로 재촉한다", async () => {
+  const store = createInMemoryStore();
+  store.session = createStartedSession(new Date("2026-03-10T09:00:00+09:00"));
+  store.threads.set(
+    "111.994",
+    {
+      ...createThreadState({
+        slackThreadTs: "111.994",
+        topicId: "event-loop",
+        openedAt: new Date("2026-03-10T09:00:00+09:00"),
+      }),
+      awaitingUserReplyAt: null,
+      lastUserReplyAt: new Date("2026-03-10T09:04:00+09:00"),
+      reminderSentAt: null,
+    },
+  );
+
+  const replies = [];
+  const bot = new TutorBot({
+    store,
+    topics: [],
+    llmRunner: createUnusedLlmRunner(),
+    slackClient: {
+      async postDirectMessage() {
+        throw new Error("should not be called");
+      },
+      async postThreadReply(threadTs, text) {
+        replies.push({ threadTs, text });
+        return { ok: true };
+      },
+    },
+  });
+
+  await bot.dispatchNextQuestion(new Date("2026-03-10T09:05:00+09:00"));
+  assert.equal(replies.length, 0);
+
+  await bot.dispatchNextQuestion(new Date("2026-03-10T09:07:00+09:00"));
+  assert.deepEqual(replies, [
+    {
+      threadTs: "111.994",
+      text: "야, 아직 답 안 했잖아. 같은 질문에서 또 도망치지 말고 지금 스레드에서 바로 답해.",
+    },
+  ]);
+  assert.equal(
+    store.threads.get("111.994")?.awaitingUserReplyAt?.toISOString(),
+    "2026-03-10T00:04:00.000Z",
+  );
+});
+
 test("사용자 답변이 들어오면 reminder 상태를 초기화하고 같은 스레드 재대기 구간에서 다시 한 번 재촉할 수 있다", async () => {
   const store = createInMemoryStore();
   store.session = createStartedSession(new Date("2026-03-10T09:00:00+09:00"));

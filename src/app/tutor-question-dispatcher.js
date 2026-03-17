@@ -59,10 +59,7 @@ export function createTutorQuestionDispatcher({
       const reminderThread = pickReminderCandidateThread(openStudyThreads, now);
       if (reminderThread) {
         await slackClient.postThreadReply(reminderThread.slackThreadTs, UNANSWERED_REMINDER_REPLY);
-        const remindedThread = {
-          ...reminderThread,
-          reminderSentAt: now,
-        };
+        const remindedThread = applyReminderMetadata(reminderThread, now);
         await store.saveThread(remindedThread);
         logger.debug("tutor_bot.dispatch_sent_unanswered_reminder", {
           threadTs: remindedThread.slackThreadTs,
@@ -432,8 +429,8 @@ function pickReminderCandidateThread(openStudyThreads, now) {
   const candidates = openStudyThreads
     .filter((thread) => isReminderDue(thread, now))
     .sort((left, right) => {
-      const leftAwaiting = left.awaitingUserReplyAt?.getTime() ?? 0;
-      const rightAwaiting = right.awaitingUserReplyAt?.getTime() ?? 0;
+      const leftAwaiting = getReminderBaseTime(left);
+      const rightAwaiting = getReminderBaseTime(right);
       if (rightAwaiting !== leftAwaiting) {
         return rightAwaiting - leftAwaiting;
       }
@@ -445,15 +442,49 @@ function pickReminderCandidateThread(openStudyThreads, now) {
 }
 
 function isReminderDue(thread, now) {
-  if (!thread.awaitingUserReplyAt || thread.reminderSentAt) {
+  if (thread.reminderSentAt) {
     return false;
   }
 
-  const awaitingAt = thread.awaitingUserReplyAt.getTime();
+  const awaitingAt = getReminderBaseTime(thread);
+  if (awaitingAt === null) {
+    return false;
+  }
+
   const lastUserReplyAt = thread.lastUserReplyAt?.getTime() ?? null;
-  if (lastUserReplyAt !== null && lastUserReplyAt > awaitingAt) {
+  if (thread.awaitingUserReplyAt && lastUserReplyAt !== null && lastUserReplyAt > awaitingAt) {
     return false;
   }
 
   return now.getTime() - awaitingAt >= UNANSWERED_REMINDER_DELAY_MS;
+}
+
+function applyReminderMetadata(thread, now) {
+  return {
+    ...thread,
+    awaitingUserReplyAt: thread.awaitingUserReplyAt ?? inferAwaitingUserReplyAt(thread),
+    reminderSentAt: now,
+  };
+}
+
+function getReminderBaseTime(thread) {
+  const awaitingAt = thread.awaitingUserReplyAt?.getTime?.() ?? null;
+  if (awaitingAt !== null) {
+    return awaitingAt;
+  }
+
+  const inferredAwaiting = inferAwaitingUserReplyAt(thread);
+  return inferredAwaiting?.getTime?.() ?? null;
+}
+
+function inferAwaitingUserReplyAt(thread) {
+  if (thread.lastUserReplyAt instanceof Date) {
+    return thread.lastUserReplyAt;
+  }
+
+  if (thread.openedAt instanceof Date) {
+    return thread.openedAt;
+  }
+
+  return null;
 }
