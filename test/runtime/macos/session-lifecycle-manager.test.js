@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { SessionLifecycleManager } from "../../../src/runtime/macos/session-lifecycle-manager.js";
 
-test("lifecycle manager는 launch와 wake/unlock 이벤트를 start로, sleep/lock 이벤트를 stop으로 매핑한다", async () => {
+test("lifecycle manager는 launch에서 stop 후 start를 수행하고 wake/unlock은 start, sleep/lock은 stop으로 매핑한다", async () => {
   const calls = [];
   const hooks = [];
   const manager = new SessionLifecycleManager({
@@ -26,6 +26,7 @@ test("lifecycle manager는 launch와 wake/unlock 이벤트를 start로, sleep/lo
   await manager.handleEvent("screen_locked");
 
   assert.deepEqual(calls.map(({ command }) => command), [
+    "stop",
     "start",
     "start",
     "start",
@@ -33,6 +34,7 @@ test("lifecycle manager는 launch와 wake/unlock 이벤트를 start로, sleep/lo
     "stop",
   ]);
   assert.deepEqual(hooks.map(({ command }) => command), [
+    "stop",
     "start",
     "start",
     "start",
