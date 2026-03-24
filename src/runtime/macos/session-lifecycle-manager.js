@@ -28,9 +28,12 @@ export class SessionLifecycleManager {
 
   async handleAppLaunch() {
     this.logger.debug("lifecycle.app_launch");
-    const session = await this.tutorBot.applyControlCommand("start", this.now());
-    await this.onControlCommandApplied("start", session);
-    return session;
+    const stoppedSession = await this.tutorBot.applyControlCommand("stop", this.now());
+    await this.onControlCommandApplied("stop", stoppedSession);
+
+    const startedSession = await this.tutorBot.applyControlCommand("start", this.now());
+    await this.onControlCommandApplied("start", startedSession);
+    return startedSession;
   }
 
   async handleEvent(eventName) {
