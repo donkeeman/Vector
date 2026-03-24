@@ -21,9 +21,11 @@ export class StudyLoop {
     this.now = now;
     this.logger = logger;
     this.pendingTimer = null;
+    this.loopEnabled = false;
   }
 
   scheduleNextQuestion() {
+    this.loopEnabled = true;
     this.cancelPendingDispatch("reschedule");
 
     const delayMs = this.createDelayMs();
@@ -42,6 +44,10 @@ export class StudyLoop {
         this.logger.error("study_loop.dispatch_failed", {
           message: error.message,
         });
+      } finally {
+        if (this.loopEnabled) {
+          this.scheduleNextQuestion();
+        }
       }
     }, delayMs);
 
@@ -49,6 +55,10 @@ export class StudyLoop {
   }
 
   handleControlCommand(command) {
+    if (command === "stop") {
+      this.loopEnabled = false;
+    }
+
     if (command === "start" || command === "stop") {
       this.cancelPendingDispatch(`control:${command}`);
     }

@@ -40,6 +40,7 @@ export class SlackMessageRouter {
     this.onControlCommandApplied = onControlCommandApplied;
     this.onStudyThreadClosed = onStudyThreadClosed;
     this.logger = logger;
+    this.controlCommandInFlight = Promise.resolve();
   }
 
   async handleMessageEvent(event) {
@@ -51,6 +52,9 @@ export class SlackMessageRouter {
         channelType: event?.channel_type ?? null,
         subtype: event?.subtype ?? null,
         botId: event?.bot_id ?? null,
+        hasClientMsgId:
+          typeof event?.client_msg_id === "string"
+          && Boolean(event.client_msg_id.trim()),
         hasText: typeof event?.text === "string" && Boolean(event.text.trim()),
         hasThreadTs: Boolean(event?.thread_ts),
         user: event?.user ?? null,
@@ -75,8 +79,7 @@ export class SlackMessageRouter {
         command,
       });
       try {
-        const session = await this.tutorBot.applyControlCommand(command, this.now());
-        await this.onControlCommandApplied(command, session);
+        await this.#applyControlCommandInOrder(command);
       } catch (error) {
         this.onError(error, event);
       }
@@ -155,8 +158,7 @@ export class SlackMessageRouter {
         command,
       });
       try {
-        const session = await this.tutorBot.applyControlCommand(command, this.now());
-        await this.onControlCommandApplied(command, session);
+        await this.#applyControlCommandInOrder(command);
       } catch (error) {
         this.onError(error, event);
       }
@@ -311,17 +313,38 @@ export class SlackMessageRouter {
       recordedAt: this.now(),
     });
   }
+
+  async #applyControlCommandInOrder(command) {
+    const run = async () => {
+      const session = await this.tutorBot.applyControlCommand(command, this.now());
+      await this.onControlCommandApplied(command, session);
+      return session;
+    };
+
+    const pending = this.controlCommandInFlight.then(run, run);
+    this.controlCommandInFlight = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    return pending;
+  }
 }
 
 function shouldHandleMessageEvent(event) {
+  const hasText = typeof event?.text === "string" && Boolean(event.text.trim());
+  const hasClientMsgId =
+    typeof event?.client_msg_id === "string"
+    && Boolean(event.client_msg_id.trim());
+  const isLikelyBotEcho = Boolean(event?.bot_id) && !hasClientMsgId;
+
   return Boolean(
     event
       && event.type === "message"
       && event.channel_type === "im"
-      && !event.bot_id
       && !event.subtype
-      && typeof event.text === "string"
-      && event.text.trim(),
+      && hasText
+      && !isLikelyBotEcho,
   );
 }
 

@@ -6,6 +6,7 @@ import {
 import { closeThread } from "../domain/thread-policy.js";
 
 const RESUME_THREAD_REPLY = "머리가 어떻게 된 거 아냐? 아직 끝내지도 못한 스레드가 버젓이 남아있잖아. 하던 거나 마저 끝내고 와. 모른다고 적당히 뭉개고 새 질문으로 도망칠 생각은 꿈도 꾸지 마.";
+const AWAITING_FIRST_REPLY_THREAD_REPLY = "야, 아직 내 마지막 질문에 답도 안 했잖아. 새로 시작 버튼 누른다고 기록이 리셋되는 줄 알았어? 딴소리하지 말고 그 스레드에서 지금 바로 답해.";
 const NOOP_LOGGER = {
   debug() {},
   error() {},
@@ -20,6 +21,7 @@ export function createTutorSessionController({
   async function applyControlCommand(command, now = new Date()) {
     const session = (await store.getSession()) ?? createInactiveSession();
     let nextSession = session;
+    const wasInactiveSession = session.state === "inactive";
 
     if (command === "start") {
       if (session.state === "inactive") {
@@ -41,14 +43,17 @@ export function createTutorSessionController({
     }
 
     if (command === "start") {
-      const resumedThread = await reopenLatestIncompleteStudyThread();
-
-      if (resumedThread) {
-        return nextSession;
-      }
-
       const openThreads = await store.listOpenThreads();
       const hasOpenStudyThread = openThreads.some((thread) => (thread.kind ?? "study") === "study");
+      const shouldAttemptResume = wasInactiveSession || !hasOpenStudyThread;
+
+      if (shouldAttemptResume) {
+        const resumedThread = await reopenLatestIncompleteStudyThread();
+
+        if (resumedThread) {
+          return nextSession;
+        }
+      }
 
       if (nextSession.state === "active" && hasOpenStudyThread === false) {
         try {
@@ -69,9 +74,43 @@ export function createTutorSessionController({
       return null;
     }
 
-    const latestIncompleteStudyThread = await store.getLatestIncompleteStudyThread();
+    let latestIncompleteStudyThread = null;
+    let hasUserReply = false;
+    if (typeof store.getLatestIncompleteStudyThreadWithReplyState === "function") {
+      const latest = await store.getLatestIncompleteStudyThreadWithReplyState();
+      latestIncompleteStudyThread = latest?.thread ?? null;
+      hasUserReply = latest?.hasUserReply ?? false;
+    } else {
+      latestIncompleteStudyThread = await store.getLatestIncompleteStudyThread();
+      hasUserReply = Boolean(latestIncompleteStudyThread?.lastUserReplyAt);
+    }
+
     if (!latestIncompleteStudyThread) {
       return null;
+    }
+
+    const awaitingUserReply = isAwaitingLatestReply(latestIncompleteStudyThread, hasUserReply);
+    if (awaitingUserReply) {
+      const awaitingThread = latestIncompleteStudyThread.status === "open"
+        ? latestIncompleteStudyThread
+        : {
+          ...latestIncompleteStudyThread,
+          status: "open",
+          closedAt: null,
+        };
+      if (awaitingThread !== latestIncompleteStudyThread) {
+        await store.saveThread(awaitingThread);
+      }
+      await slackClient.postThreadReply(
+        awaitingThread.slackThreadTs,
+        AWAITING_FIRST_REPLY_THREAD_REPLY,
+      );
+      logger.debug("tutor_bot.start_resumed_thread", {
+        threadTs: awaitingThread.slackThreadTs,
+        topicId: awaitingThread.topicId,
+        reason: "awaiting_first_reply",
+      });
+      return awaitingThread;
     }
 
     const reopenedThread = {
@@ -107,4 +146,14 @@ export function createTutorSessionController({
     reopenLatestIncompleteStudyThread,
     closeOpenStudyThreadsAsStopped,
   };
+}
+
+function isAwaitingLatestReply(thread, hasUserReply) {
+  const awaitingAt = thread.awaitingUserReplyAt?.getTime() ?? null;
+  if (awaitingAt === null) {
+    return !hasUserReply;
+  }
+
+  const lastUserReplyAt = thread.lastUserReplyAt?.getTime() ?? null;
+  return lastUserReplyAt === null || lastUserReplyAt <= awaitingAt;
 }

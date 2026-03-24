@@ -2,131 +2,167 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  classifyReviewPriority,
+  classifyTopicLane,
   createEmptyTopicMemory,
-  scheduleReview,
+  pickReviewTopic,
+  selectStudyLane,
   updateTopicMemory,
-  pickNextTopic,
 } from "../../src/domain/topic-memory.js";
 
-test("blocked 주제는 최소 하루 뒤에 다시 묻는다", () => {
-  const now = new Date("2026-03-10T10:00:00+09:00");
+test("createEmptyTopicMemory는 structured memory 기본 shape를 가진다", () => {
+  const memory = createEmptyTopicMemory();
 
-  const nextReviewAt = scheduleReview(
-    {
-      masteryScore: 0.2,
-      attemptCount: 1,
-      successCount: 0,
-      failureCount: 1,
-      lastOutcome: "blocked",
-      nextReviewAt: null,
-      masteredStreak: 0,
-    },
-    "blocked",
-    now,
-  );
-
-  assert.equal(nextReviewAt.toISOString(), "2026-03-11T01:00:00.000Z");
+  assert.equal(memory.learningState, "new");
+  assert.equal(memory.timesAsked, 0);
+  assert.equal(memory.timesBlocked, 0);
+  assert.equal(memory.timesRecovered, 0);
+  assert.equal(memory.timesMasteredClean, 0);
+  assert.equal(memory.timesMasteredRecovered, 0);
+  assert.equal(memory.lastMisconceptionSummary, null);
+  assert.equal(memory.lastTeachingSummary, null);
+  assert.equal(memory.lastAskedAt, null);
+  assert.equal(memory.lastAnsweredAt, null);
+  assert.equal(memory.lastOutcome, null);
+  assert.equal(memory.nextReviewAt, null);
+  assert.equal("masteryScore" in memory, false);
+  assert.equal("successCount" in memory, false);
+  assert.equal("failureCount" in memory, false);
+  assert.equal("lastMasteryKind" in memory, false);
 });
 
-test("mastered 주제는 나중에 다시 물어보되 연속 정답일수록 간격이 늘어난다", () => {
-  const now = new Date("2026-03-10T10:00:00+09:00");
-  const empty = createEmptyTopicMemory();
-
-  const first = updateTopicMemory(empty, "mastered", now, { masteryKind: "clean" });
-  assert.equal(first.nextReviewAt?.toISOString(), "2026-03-17T01:00:00.000Z");
-  assert.equal(first.masteredStreak, 1);
-
-  const second = updateTopicMemory(first, "mastered", now, { masteryKind: "clean" });
-  assert.equal(second.nextReviewAt?.toISOString(), "2026-03-24T01:00:00.000Z");
-  assert.equal(second.masteredStreak, 2);
-});
-
-test("recovered mastery는 clean mastery보다 한 단계 짧은 간격으로 다시 묻는다", () => {
+test("outcome 전이에 따라 learningState가 계산된다", () => {
   const now = new Date("2026-03-10T10:00:00+09:00");
   const empty = createEmptyTopicMemory();
 
-  const cleanFirst = updateTopicMemory(empty, "mastered", now, { masteryKind: "clean" });
-  const recoveredFirst = updateTopicMemory(empty, "mastered", now, { masteryKind: "recovered" });
-  assert.equal(cleanFirst.nextReviewAt?.toISOString(), "2026-03-17T01:00:00.000Z");
-  assert.equal(recoveredFirst.nextReviewAt?.toISOString(), "2026-03-13T01:00:00.000Z");
+  const firstSuccess = updateTopicMemory(empty, "mastered", now);
+  assert.equal(firstSuccess.learningState, "mastered_clean");
+  assert.equal(firstSuccess.timesMasteredClean, 1);
+  assert.equal("masteryScore" in firstSuccess, false);
+  assert.equal("successCount" in firstSuccess, false);
+  assert.equal("failureCount" in firstSuccess, false);
+  assert.equal("lastMasteryKind" in firstSuccess, false);
 
-  const cleanSecond = updateTopicMemory(cleanFirst, "mastered", now, { masteryKind: "clean" });
-  const recoveredSecond = updateTopicMemory(recoveredFirst, "mastered", now, { masteryKind: "recovered" });
-  assert.equal(cleanSecond.nextReviewAt?.toISOString(), "2026-03-24T01:00:00.000Z");
-  assert.equal(recoveredSecond.nextReviewAt?.toISOString(), "2026-03-17T01:00:00.000Z");
+  const blocked = updateTopicMemory(empty, "blocked", now);
+  assert.equal(blocked.learningState, "blocked");
+  assert.equal(blocked.timesBlocked, 1);
+
+  const recovered = updateTopicMemory(blocked, "mastered", now);
+  assert.equal(recovered.learningState, "mastered_recovered");
+  assert.equal(recovered.timesRecovered, 1);
+  assert.equal(recovered.timesMasteredRecovered, 1);
+
+  const fuzzy = updateTopicMemory(empty, "continue", now);
+  assert.equal(fuzzy.learningState, "fuzzy");
 });
 
-test("출제 우선순위는 blocked due > weak due > new > mastered due 순이다", () => {
+test("new > review lane 분류와 review 우선순위(blocked > fuzzy > mastered_recovered > mastered_clean)가 고정된다", () => {
+  const now = new Date("2026-03-10T10:00:00+09:00");
+
+  assert.equal(classifyTopicLane(null), "new");
+  assert.equal(classifyTopicLane({ ...createEmptyTopicMemory(), timesAsked: 1 }), "review");
+
+  const blockedMemory = {
+    ...createEmptyTopicMemory(),
+    timesAsked: 1,
+    learningState: "blocked",
+    nextReviewAt: now,
+  };
+  const fuzzyMemory = {
+    ...createEmptyTopicMemory(),
+    timesAsked: 1,
+    learningState: "fuzzy",
+    nextReviewAt: now,
+  };
+  const recoveredMemory = {
+    ...createEmptyTopicMemory(),
+    timesAsked: 1,
+    learningState: "mastered_recovered",
+    nextReviewAt: now,
+  };
+  const cleanMemory = {
+    ...createEmptyTopicMemory(),
+    timesAsked: 1,
+    learningState: "mastered_clean",
+    nextReviewAt: now,
+  };
+
+  assert.equal(classifyReviewPriority(blockedMemory, now), 4);
+  assert.equal(classifyReviewPriority(fuzzyMemory, now), 3);
+  assert.equal(classifyReviewPriority(recoveredMemory, now), 2);
+  assert.equal(classifyReviewPriority(cleanMemory, now), 1);
+});
+
+test("lane selector는 new/review가 모두 가능하면 기본 비율을 new 60, review 40으로 고른다", () => {
+  let newCount = 0;
+  let reviewCount = 0;
+
+  for (let index = 0; index < 100; index += 1) {
+    const lane = selectStudyLane({
+      hasNewTopic: true,
+      hasReviewTopic: true,
+      random: () => index / 100,
+    });
+
+    if (lane === "new") {
+      newCount += 1;
+    } else if (lane === "review") {
+      reviewCount += 1;
+    }
+  }
+
+  assert.equal(newCount, 60);
+  assert.equal(reviewCount, 40);
+  assert.ok(newCount > reviewCount);
+});
+
+test("review lane에서 topic 선택 우선순위는 blocked > fuzzy > mastered_recovered > mastered_clean이다", () => {
   const now = new Date("2026-03-10T10:00:00+09:00");
   const topics = [
-    {
-      id: "mastered-topic",
-      title: "Mastered Topic",
-      category: "frontend",
-      promptSeed: "Explain event delegation.",
-      weight: 3,
-    },
-    {
-      id: "new-topic",
-      title: "New Topic",
-      category: "frontend",
-      promptSeed: "Explain the rendering pipeline.",
-      weight: 3,
-    },
-    {
-      id: "weak-topic",
-      title: "Weak Topic",
-      category: "network",
-      promptSeed: "Explain HTTP caching.",
-      weight: 2,
-    },
-    {
-      id: "blocked-topic",
-      title: "Blocked Topic",
-      category: "os",
-      promptSeed: "Explain process vs thread.",
-      weight: 1,
-    },
+    { id: "blocked-topic", title: "Blocked", category: "os", promptSeed: "x", weight: 1 },
+    { id: "fuzzy-topic", title: "Fuzzy", category: "os", promptSeed: "x", weight: 1 },
+    { id: "recovered-topic", title: "Recovered", category: "os", promptSeed: "x", weight: 1 },
+    { id: "clean-topic", title: "Clean", category: "os", promptSeed: "x", weight: 1 },
   ];
 
-  const selected = pickNextTopic({
+  const selected = pickReviewTopic({
     now,
     topics,
     memories: new Map([
       [
-        "mastered-topic",
-        {
-          masteryScore: 0.9,
-          attemptCount: 3,
-          successCount: 3,
-          failureCount: 0,
-          lastOutcome: "mastered",
-          nextReviewAt: now,
-          masteredStreak: 2,
-        },
-      ],
-      [
-        "weak-topic",
-        {
-          masteryScore: 0.4,
-          attemptCount: 2,
-          successCount: 1,
-          failureCount: 1,
-          lastOutcome: "continue",
-          nextReviewAt: now,
-          masteredStreak: 0,
-        },
-      ],
-      [
         "blocked-topic",
         {
-          masteryScore: 0.1,
-          attemptCount: 1,
-          successCount: 0,
-          failureCount: 1,
-          lastOutcome: "blocked",
+          ...createEmptyTopicMemory(),
+          timesAsked: 1,
+          learningState: "blocked",
           nextReviewAt: now,
-          masteredStreak: 0,
+        },
+      ],
+      [
+        "fuzzy-topic",
+        {
+          ...createEmptyTopicMemory(),
+          timesAsked: 1,
+          learningState: "fuzzy",
+          nextReviewAt: now,
+        },
+      ],
+      [
+        "recovered-topic",
+        {
+          ...createEmptyTopicMemory(),
+          timesAsked: 1,
+          learningState: "mastered_recovered",
+          nextReviewAt: now,
+        },
+      ],
+      [
+        "clean-topic",
+        {
+          ...createEmptyTopicMemory(),
+          timesAsked: 1,
+          learningState: "mastered_clean",
+          nextReviewAt: now,
         },
       ],
     ]),

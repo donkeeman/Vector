@@ -1,11 +1,18 @@
 import { createInactiveSession, shouldDispatchAutoQuestion } from "../domain/session-policy.js";
 import { createThreadState } from "../domain/thread-policy.js";
-import { pickNextTopic } from "../domain/topic-memory.js";
+import {
+  classifyReviewPriority,
+  classifyTopicLane,
+  pickReviewTopic,
+  selectStudyLane,
+} from "../domain/topic-memory.js";
 
 const NOOP_LOGGER = {
   debug() {},
   error() {},
 };
+const UNANSWERED_REMINDER_DELAY_MS = 2 * 60 * 1000;
+const UNANSWERED_REMINDER_REPLY = "야, 아직 답 안 했잖아. 같은 질문에서 또 도망치지 말고 지금 스레드에서 바로 답해.";
 
 export function createTutorQuestionDispatcher({
   store,
@@ -42,10 +49,25 @@ export function createTutorQuestionDispatcher({
   async function runDispatch(now) {
     const session = (await store.getSession()) ?? createInactiveSession();
     const openThreads = await store.listOpenThreads();
-    const hasOpenStudyThread = openThreads.some((thread) => (thread.kind ?? "study") === "study");
+    const openStudyThreads = openThreads.filter((thread) => (thread.kind ?? "study") === "study");
+    const hasOpenStudyThread = openStudyThreads.length > 0;
     const hasCounterQuestionThread = openThreads.some(
       (thread) => thread.mode === "counterquestion",
     );
+
+    if (hasOpenStudyThread) {
+      const reminderThread = pickReminderCandidateThread(openStudyThreads, now);
+      if (reminderThread) {
+        await slackClient.postThreadReply(reminderThread.slackThreadTs, UNANSWERED_REMINDER_REPLY);
+        const remindedThread = applyReminderMetadata(reminderThread, now);
+        await store.saveThread(remindedThread);
+        logger.debug("tutor_bot.dispatch_sent_unanswered_reminder", {
+          threadTs: remindedThread.slackThreadTs,
+          topicId: remindedThread.topicId,
+        });
+        return null;
+      }
+    }
 
     if (hasOpenStudyThread || !shouldDispatchAutoQuestion(session, hasCounterQuestionThread)) {
       logger.debug("tutor_bot.dispatch_skipped", {
@@ -93,9 +115,17 @@ export function createTutorQuestionDispatcher({
     });
     lastDispatchedTopicId = topic.id;
     const topicMemory = memories.get(topic.id) ?? null;
+    const retrievalContext = await loadRetrievalContext({
+      topicId: topic.id,
+      topicMemory,
+    });
     const question = await llmRunner.runTask("question", {
       topic,
       topicMemory,
+      recentAttempts: retrievalContext.recentAttempts,
+      latestTeachingMemory: retrievalContext.latestTeachingMemory,
+      previousMisconceptionSummary: retrievalContext.previousMisconceptionSummary,
+      previousTeachingSummary: retrievalContext.previousTeachingSummary,
     });
     const message = await slackClient.postDirectMessage(question.text);
     const thread = createThreadState({
@@ -195,6 +225,30 @@ export function createTutorQuestionDispatcher({
     return lastDispatchedTopicId ? [lastDispatchedTopicId] : [];
   }
 
+  async function loadRetrievalContext({ topicId, topicMemory }) {
+    const recentAttempts = typeof store.listAttemptsByTopic === "function"
+      ? await store.listAttemptsByTopic(topicId, { limit: 5 })
+      : [];
+    const latestTeachingMemory = typeof store.getLatestTeachingMemory === "function"
+      ? await store.getLatestTeachingMemory(topicId)
+      : null;
+    const previousMisconceptionSummary =
+      topicMemory?.lastMisconceptionSummary
+      ?? recentAttempts.find((attempt) => attempt.misconceptionSummary)?.misconceptionSummary
+      ?? null;
+    const previousTeachingSummary =
+      latestTeachingMemory?.teachingSummary
+      ?? topicMemory?.lastTeachingSummary
+      ?? null;
+
+    return {
+      recentAttempts,
+      latestTeachingMemory,
+      previousMisconceptionSummary,
+      previousTeachingSummary,
+    };
+  }
+
   return {
     dispatchNextQuestion,
   };
@@ -213,26 +267,72 @@ export function pickTopicForContinuousFlow({
   }
 
   const memoryMap = memories instanceof Map ? memories : new Map();
+  const newTopicCandidates = topics.filter((topic) => {
+    const memory = memoryMap.get(topic.id) ?? null;
+    return classifyTopicLane(memory) === "new";
+  });
   const reviewCandidates = topics.filter((topic) => {
-    const memory = memoryMap.get(topic.id);
-    if (!memory) {
-      return false;
-    }
-    if (memory.nextReviewAt && memory.nextReviewAt.getTime() > now.getTime()) {
-      return false;
-    }
-    return true;
+    const memory = memoryMap.get(topic.id) ?? null;
+    return classifyReviewPriority(memory, now) !== null;
+  });
+  const lane = selectStudyLane({
+    hasNewTopic: newTopicCandidates.length > 0,
+    hasReviewTopic: reviewCandidates.length > 0,
+    random,
   });
 
-  if (reviewCandidates.length > 0) {
-    return pickNextTopic({
+  if (!lane) {
+    return null;
+  }
+
+  if (lane === "review") {
+    const reviewTopic = pickReviewTopic({
       now,
       topics: reviewCandidates,
       memories: memoryMap,
     });
+
+    if (
+      reviewTopic
+      && newTopicCandidates.length > 0
+      && reviewTopic.id === lastTopicId
+    ) {
+      return pickNewTopic({
+        newTopicCandidates,
+        random,
+        lastTopicId,
+        state,
+      });
+    }
+
+    if (reviewTopic) {
+      return reviewTopic;
+    }
   }
 
-  const newTopicCandidates = topics.filter((topic) => memoryMap.has(topic.id) === false);
+  const newTopic = pickNewTopic({
+    newTopicCandidates,
+    random,
+    lastTopicId,
+    state,
+  });
+  if (newTopic) {
+    return newTopic;
+  }
+
+  return pickReviewTopic({
+    now,
+    topics: reviewCandidates,
+    memories: memoryMap,
+  });
+}
+
+function pickNewTopic({
+  newTopicCandidates,
+  random,
+  lastTopicId,
+  state,
+}) {
   if (newTopicCandidates.length === 0) {
     return null;
   }
@@ -323,4 +423,68 @@ function createUniqueTopicId(baseId, existingIds) {
   }
 
   return nextId;
+}
+
+function pickReminderCandidateThread(openStudyThreads, now) {
+  const candidates = openStudyThreads
+    .filter((thread) => isReminderDue(thread, now))
+    .sort((left, right) => {
+      const leftAwaiting = getReminderBaseTime(left);
+      const rightAwaiting = getReminderBaseTime(right);
+      if (rightAwaiting !== leftAwaiting) {
+        return rightAwaiting - leftAwaiting;
+      }
+
+      return right.openedAt.getTime() - left.openedAt.getTime();
+    });
+
+  return candidates[0] ?? null;
+}
+
+function isReminderDue(thread, now) {
+  if (thread.reminderSentAt) {
+    return false;
+  }
+
+  const awaitingAt = getReminderBaseTime(thread);
+  if (awaitingAt === null) {
+    return false;
+  }
+
+  const lastUserReplyAt = thread.lastUserReplyAt?.getTime() ?? null;
+  if (thread.awaitingUserReplyAt && lastUserReplyAt !== null && lastUserReplyAt > awaitingAt) {
+    return false;
+  }
+
+  return now.getTime() - awaitingAt >= UNANSWERED_REMINDER_DELAY_MS;
+}
+
+function applyReminderMetadata(thread, now) {
+  return {
+    ...thread,
+    awaitingUserReplyAt: thread.awaitingUserReplyAt ?? inferAwaitingUserReplyAt(thread),
+    reminderSentAt: now,
+  };
+}
+
+function getReminderBaseTime(thread) {
+  const awaitingAt = thread.awaitingUserReplyAt?.getTime?.() ?? null;
+  if (awaitingAt !== null) {
+    return awaitingAt;
+  }
+
+  const inferredAwaiting = inferAwaitingUserReplyAt(thread);
+  return inferredAwaiting?.getTime?.() ?? null;
+}
+
+function inferAwaitingUserReplyAt(thread) {
+  if (thread.lastUserReplyAt instanceof Date) {
+    return thread.lastUserReplyAt;
+  }
+
+  if (thread.openedAt instanceof Date) {
+    return thread.openedAt;
+  }
+
+  return null;
 }

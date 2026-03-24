@@ -123,6 +123,73 @@ test("DM 루트 !stop 명령은 세션을 멈추지만 Slack 답장은 남기지
   assert.deepEqual(router.slackClient.replies, []);
 });
 
+test("연속 제어 명령은 도착 순서대로 직렬 처리한다", async () => {
+  const calls = [];
+  let activeControls = 0;
+  let maxActiveControls = 0;
+  let releaseStop;
+  const stopGate = new Promise((resolve) => {
+    releaseStop = resolve;
+  });
+
+  const router = new SlackMessageRouter({
+    store: createStore(),
+    tutorBot: {
+      async applyControlCommand(command, now) {
+        activeControls += 1;
+        maxActiveControls = Math.max(maxActiveControls, activeControls);
+        calls.push(`enter:${command}`);
+
+        if (command === "stop") {
+          await stopGate;
+        }
+
+        calls.push(`exit:${command}`);
+        activeControls -= 1;
+        return { state: command === "start" ? "active" : "inactive", startedAt: now };
+      },
+      async handleThreadMessage() {
+        throw new Error("should not be called");
+      },
+    },
+    llmRunner: createUnusedLlmRunner(),
+    slackClient: createSlackClient(),
+    now: () => new Date("2026-03-11T17:00:00+09:00"),
+  });
+
+  const stopPromise = router.handleMessageEvent({
+    type: "message",
+    channel_type: "im",
+    channel: "D123",
+    user: "U123",
+    text: "!stop",
+    ts: "2000.1",
+  });
+  const startPromise = router.handleMessageEvent({
+    type: "message",
+    channel_type: "im",
+    channel: "D123",
+    user: "U123",
+    text: "!start",
+    ts: "2000.2",
+  });
+
+  await Promise.resolve();
+  assert.deepEqual(calls, ["enter:stop"]);
+  assert.equal(maxActiveControls, 1);
+
+  releaseStop();
+  await Promise.all([stopPromise, startPromise]);
+
+  assert.deepEqual(calls, [
+    "enter:stop",
+    "exit:stop",
+    "enter:start",
+    "exit:start",
+  ]);
+  assert.equal(maxActiveControls, 1);
+});
+
 test("inactive 상태의 DM 루트 일반 메시지는 조용히 무시한다", async () => {
   const llmCalls = [];
   const store = createStore();
@@ -600,6 +667,45 @@ test("DM 스레드 reply는 TutorBot.handleThreadMessage로 전달된다", async
   assert.equal(closedThreadSignals[0].shouldScheduleNextQuestion, true);
 });
 
+test("DM 스레드 reply에 bot_id가 함께 와도 user가 있으면 TutorBot.handleThreadMessage로 전달된다", async () => {
+  const calls = [];
+  const router = new SlackMessageRouter({
+    store: createStore(),
+    tutorBot: {
+      async applyControlCommand() {
+        throw new Error("should not be called");
+      },
+      async handleThreadMessage(payload) {
+        calls.push(payload);
+        return null;
+      },
+    },
+    llmRunner: createUnusedLlmRunner(),
+    slackClient: createSlackClient(),
+    now: () => new Date("2026-03-10T17:04:00+09:00"),
+  });
+
+  await router.handleMessageEvent({
+    type: "message",
+    channel_type: "im",
+    channel: "D123",
+    user: "U123",
+    bot_id: "B123",
+    client_msg_id: "c111",
+    text: "후속 답변입니다.",
+    ts: "1000.45",
+    thread_ts: "1000.1",
+  });
+
+  assert.deepEqual(calls, [
+    {
+      threadTs: "1000.1",
+      text: "후속 답변입니다.",
+      now: new Date("2026-03-10T17:04:00+09:00"),
+    },
+  ]);
+});
+
 test("DM 스레드 !start/!stop도 제어 명령으로 처리한다", async () => {
   const controlCalls = [];
   const controlHooks = [];
@@ -1061,7 +1167,7 @@ test("study 스레드 처리 실패 시에도 같은 공통 실패 응답을 단
   ]);
 });
 
-test("봇 메시지, subtype 메시지, DM 외 채널 메시지는 무시하고 이유 필드를 로그에 남긴다", async () => {
+test("봇 에코 메시지, subtype 메시지, DM 외 채널 메시지는 무시하고 이유 필드를 로그에 남긴다", async () => {
   const slackClient = createSlackClient();
   const logs = [];
   const router = new SlackMessageRouter({
@@ -1085,6 +1191,7 @@ test("봇 메시지, subtype 메시지, DM 외 채널 메시지는 무시하고 
     type: "message",
     channel_type: "im",
     channel: "D123",
+    user: "UBOT",
     bot_id: "B123",
     text: "ignored",
     ts: "1000.6",
@@ -1118,9 +1225,10 @@ test("봇 메시지, subtype 메시지, DM 외 채널 메시지는 무시하고 
         channelType: "im",
         subtype: null,
         botId: "B123",
+        hasClientMsgId: false,
         hasText: true,
         hasThreadTs: false,
-        user: null,
+        user: "UBOT",
       },
     },
     {
@@ -1132,6 +1240,7 @@ test("봇 메시지, subtype 메시지, DM 외 채널 메시지는 무시하고 
         channelType: "im",
         subtype: "message_changed",
         botId: null,
+        hasClientMsgId: false,
         hasText: true,
         hasThreadTs: false,
         user: "U123",
@@ -1146,6 +1255,7 @@ test("봇 메시지, subtype 메시지, DM 외 채널 메시지는 무시하고 
         channelType: "channel",
         subtype: null,
         botId: null,
+        hasClientMsgId: false,
         hasText: true,
         hasThreadTs: false,
         user: "U123",

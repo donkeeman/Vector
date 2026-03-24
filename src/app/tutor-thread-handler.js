@@ -9,8 +9,6 @@ import {
   updateTopicMemory,
 } from "../domain/topic-memory.js";
 
-const CLEAN_MASTERY_STATUS_REPLY = "...뭐야? 이걸 한 번에 이렇게 다 대답한다고? ...너 어디서 미리 답안지라도 외워왔어? 하, 착각하지 마. 이번 건 워낙 기초적인 거라 나도 대충 넘어가는 거니까. 우쭐대지 마. 다음엔 진짜 네 한계를 박살 내줄 테니까.";
-const RECOVERED_MASTERY_STATUS_REPLY = "이제야 겨우 알아듣네. 거봐, 내가 제대로 짚어주지 않았으면 넌 평생 그 얕은 논리에서 허우적대고 있었을 거 아냐. 넌 나 없으면 어떡할 뻔했냐? 오늘 내가 가르쳐준 거 머릿속에 꽉 박아둬. 잊어버리면 가만 안 둬.";
 const NOOP_LOGGER = {
   debug() {},
   error() {},
@@ -40,8 +38,11 @@ export function createTutorThreadHandler({
       return null;
     }
 
+    const repliedThread = applyUserReplyMetadata(thread, now);
+    await store.saveThread(repliedThread);
+
     if (looksLikeCounterQuestion(text)) {
-      const counterThread = markThreadAsCounterQuestion(thread, now);
+      const counterThread = markThreadAsCounterQuestion(repliedThread, now);
       await store.saveThread(counterThread);
 
       const answer = await llmRunner.runTask("answer_counterquestion", {
@@ -71,37 +72,53 @@ export function createTutorThreadHandler({
       };
     }
 
+    const currentMemory =
+      (await store.getTopicMemory(repliedThread.topicId)) ?? createEmptyTopicMemory();
+    const retrievalContext = await loadRetrievalContext({
+      store,
+      topicId: repliedThread.topicId,
+      topicMemory: currentMemory,
+    });
     const evaluation = await llmRunner.runTask("evaluate", {
-      thread,
+      thread: repliedThread,
       text,
-      lastAssistantPrompt: thread.lastAssistantPrompt ?? null,
-      lastChallengePrompt: getChallengePrompt(thread),
-      codexSessionId: thread.codexSessionId ?? null,
+      lastAssistantPrompt: repliedThread.lastAssistantPrompt ?? null,
+      lastChallengePrompt: getChallengePrompt(repliedThread),
+      codexSessionId: repliedThread.codexSessionId ?? null,
+      topicMemory: currentMemory,
+      recentAttempts: retrievalContext.recentAttempts,
+      latestTeachingMemory: retrievalContext.latestTeachingMemory,
+      previousMisconceptionSummary: retrievalContext.previousMisconceptionSummary,
+      previousTeachingSummary: retrievalContext.previousTeachingSummary,
     });
     const normalizedEvaluation = normalizeEvaluationResult(text, evaluation);
-    const sessionBoundThread = mergeCodexSessionId(thread, normalizedEvaluation.codexSessionId);
+    const sessionBoundThread = mergeCodexSessionId(repliedThread, normalizedEvaluation.codexSessionId);
 
     await store.saveAttempt({
       threadTs,
-      topicId: thread.topicId,
+      topicId: repliedThread.topicId,
       answer: text,
+      answerSummary: normalizedEvaluation.answerSummary ?? null,
+      misconceptionSummary: normalizedEvaluation.misconceptionSummary ?? null,
+      attemptKind: normalizedEvaluation.attemptKind ?? "evaluation",
       outcome: normalizedEvaluation.outcome,
       recordedAt: now,
       rationale: normalizedEvaluation.rationale ?? null,
     });
 
-    const currentMemory =
-      (await store.getTopicMemory(thread.topicId)) ?? createEmptyTopicMemory();
     const masteryKind = normalizedEvaluation.outcome === "mastered"
-      ? (thread.blockedOnce ? "recovered" : "clean")
+      ? (sessionBoundThread.blockedOnce ? "recovered" : "clean")
       : undefined;
     const nextMemory = updateTopicMemory(
       currentMemory,
       normalizedEvaluation.outcome,
       now,
-      masteryKind ? { masteryKind } : {},
+      {
+        ...(masteryKind ? { masteryKind } : {}),
+        lastMisconceptionSummary: normalizedEvaluation.misconceptionSummary ?? null,
+      },
     );
-    await store.saveTopicMemory(thread.topicId, nextMemory);
+    await store.saveTopicMemory(repliedThread.topicId, nextMemory);
 
     if (normalizedEvaluation.outcome === "continue") {
       const followUp = await llmRunner.runTask("followup", {
@@ -111,6 +128,11 @@ export function createTutorThreadHandler({
         lastAssistantPrompt: sessionBoundThread.lastAssistantPrompt ?? null,
         lastChallengePrompt: getChallengePrompt(sessionBoundThread),
         codexSessionId: sessionBoundThread.codexSessionId ?? null,
+        topicMemory: currentMemory,
+        recentAttempts: retrievalContext.recentAttempts,
+        latestTeachingMemory: retrievalContext.latestTeachingMemory,
+        previousMisconceptionSummary: retrievalContext.previousMisconceptionSummary,
+        previousTeachingSummary: retrievalContext.previousTeachingSummary,
       });
 
       await slackClient.postThreadReply(threadTs, followUp.text);
@@ -121,9 +143,10 @@ export function createTutorThreadHandler({
           challengePrompt: followUp.challengePrompt ?? followUp.text,
         },
       );
-      await store.saveThread(continuedThread);
+      const waitingThread = applyAwaitingUserReplyMetadata(continuedThread, now);
+      await store.saveThread(waitingThread);
       return {
-        thread: continuedThread,
+        thread: waitingThread,
         memory: nextMemory,
         shouldScheduleNextQuestion: false,
       };
@@ -137,12 +160,38 @@ export function createTutorThreadHandler({
         lastAssistantPrompt: sessionBoundThread.lastAssistantPrompt ?? null,
         lastChallengePrompt: getChallengePrompt(sessionBoundThread),
         codexSessionId: sessionBoundThread.codexSessionId ?? null,
+        topicMemory: currentMemory,
+        recentAttempts: retrievalContext.recentAttempts,
+        latestTeachingMemory: retrievalContext.latestTeachingMemory,
+        previousMisconceptionSummary: retrievalContext.previousMisconceptionSummary,
+        previousTeachingSummary: retrievalContext.previousTeachingSummary,
       });
 
       const challengePrompt = normalizeChallengePrompt(
         teaching.challengePrompt,
         getChallengePrompt(sessionBoundThread),
       );
+      const teachingSummary = normalizeTextOrNull(teaching.teachingSummary ?? teaching.text);
+      const challengeSummary = normalizeTextOrNull(teaching.challengeSummary ?? challengePrompt);
+      const blockedMemory = teachingSummary
+        ? {
+          ...nextMemory,
+          lastTeachingSummary: teachingSummary,
+        }
+        : nextMemory;
+
+      if (typeof store.saveTeachingMemory === "function" && teachingSummary) {
+        await store.saveTeachingMemory({
+          topicId: repliedThread.topicId,
+          threadTs,
+          teachingSummary,
+          challengeSummary,
+          createdAt: now,
+        });
+      }
+      if (blockedMemory !== nextMemory) {
+        await store.saveTopicMemory(repliedThread.topicId, blockedMemory);
+      }
       await slackClient.postThreadReply(threadTs, teaching.text);
       if (challengePrompt && challengePrompt !== teaching.text) {
         await slackClient.postThreadReply(threadTs, challengePrompt);
@@ -157,20 +206,18 @@ export function createTutorThreadHandler({
           challengePrompt,
         },
       );
-      await store.saveThread(blockedThread);
+      const waitingBlockedThread = applyAwaitingUserReplyMetadata(blockedThread, now);
+      await store.saveThread(waitingBlockedThread);
       return {
-        thread: blockedThread,
-        memory: nextMemory,
+        thread: waitingBlockedThread,
+        memory: blockedMemory,
         shouldScheduleNextQuestion: false,
       };
     }
 
-    const reply = normalizedEvaluation.text ?? "흥, 이번엔 넘어간다. 다음엔 더 깊게 물어볼 거야.";
+    const reply = normalizeTextOrNull(normalizedEvaluation.text)
+      ?? "흥, 이번엔 넘어간다. 다음엔 더 깊게 물어볼 거야.";
     await slackClient.postThreadReply(threadTs, reply);
-    await slackClient.postThreadReply(
-      threadTs,
-      masteryKind === "recovered" ? RECOVERED_MASTERY_STATUS_REPLY : CLEAN_MASTERY_STATUS_REPLY,
-    );
     const closedThread = closeThread(sessionBoundThread, "mastered", now);
     await store.saveThread(closedThread);
     return {
@@ -245,4 +292,54 @@ function normalizeChallengePrompt(primary, fallback) {
 
   const fallbackText = typeof fallback === "string" ? fallback.trim() : "";
   return fallbackText || null;
+}
+
+function normalizeTextOrNull(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+  return normalized || null;
+}
+
+function applyUserReplyMetadata(thread, now) {
+  return {
+    ...thread,
+    lastUserReplyAt: now,
+    awaitingUserReplyAt: null,
+    reminderSentAt: null,
+  };
+}
+
+function applyAwaitingUserReplyMetadata(thread, now) {
+  return {
+    ...thread,
+    awaitingUserReplyAt: now,
+    reminderSentAt: null,
+  };
+}
+
+async function loadRetrievalContext({ store, topicId, topicMemory }) {
+  const recentAttempts = typeof store.listAttemptsByTopic === "function"
+    ? await store.listAttemptsByTopic(topicId, { limit: 5 })
+    : [];
+  const latestTeachingMemory = typeof store.getLatestTeachingMemory === "function"
+    ? await store.getLatestTeachingMemory(topicId)
+    : null;
+  const previousMisconceptionSummary =
+    topicMemory?.lastMisconceptionSummary
+    ?? recentAttempts.find((attempt) => attempt.misconceptionSummary)?.misconceptionSummary
+    ?? null;
+  const previousTeachingSummary =
+    latestTeachingMemory?.teachingSummary
+    ?? topicMemory?.lastTeachingSummary
+    ?? null;
+
+  return {
+    recentAttempts,
+    latestTeachingMemory,
+    previousMisconceptionSummary,
+    previousTeachingSummary,
+  };
 }
