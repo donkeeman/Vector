@@ -514,6 +514,51 @@ test("active 세션이면 우선순위가 가장 높은 주제로 자동 질문�
   assert.equal(store.threads.get("111.222")?.codexSessionId, "study-session-1");
 });
 
+test("debug 모드면 스터디 질문 메시지에 현재 질문 스택을 함께 붙인다", async () => {
+  const store = createInMemoryStore();
+  store.session = createStartedSession(new Date("2026-03-10T09:00:00+09:00"));
+  const slackMessages = [];
+  const bot = new TutorBot({
+    store,
+    topics: [
+      {
+        id: "network-basics",
+        title: "Network Basics",
+        category: "network",
+        promptSeed: "OSI layer quick check",
+        weight: 3,
+      },
+    ],
+    includeStudyStackDebug: true,
+    llmRunner: {
+      async runTask(type) {
+        if (type === "question") {
+          return {
+            text: "TCP 3-way handshake 순서를 말해봐.",
+          };
+        }
+
+        throw new Error(`unexpected task: ${type}`);
+      },
+    },
+    slackClient: {
+      async postDirectMessage(text) {
+        slackMessages.push(text);
+        return { channel: "D123", ts: "111.223" };
+      },
+      async postThreadReply() {
+        throw new Error("should not be called");
+      },
+    },
+  });
+
+  await bot.dispatchNextQuestion(new Date("2026-03-10T09:05:00+09:00"));
+
+  assert.deepEqual(slackMessages, [
+    "TCP 3-way handshake 순서를 말해봐.\n[debug] study-stack depth=1/5 blockedOnce=false path=TCP 3-way handshake 순서를 말해봐.",
+  ]);
+});
+
 test("저장된 토픽이 없고 due 복습도 없으면 topic task로 새 토픽을 생성해 출제한다", async () => {
   const store = createInMemoryStore();
   store.session = createStartedSession(new Date("2026-03-10T09:00:00+09:00"));
@@ -1232,6 +1277,171 @@ test("평가 결과가 continue면 같은 스레드에 꼬리질문을 이어서
   );
 });
 
+test("debug 모드면 스터디 스레드 답변에도 현재 질문 스택을 붙인다", async () => {
+  const store = createInMemoryStore();
+  store.threads.set(
+    "111.224",
+    createThreadState({
+      slackThreadTs: "111.224",
+      topicId: "event-loop",
+      openedAt: new Date("2026-03-10T09:00:00+09:00"),
+      studyQuestionRound: 3,
+      studyQuestionRoundLimit: 5,
+    }),
+  );
+
+  const replies = [];
+  const bot = new TutorBot({
+    store,
+    topics: [],
+    includeStudyStackDebug: true,
+    llmRunner: {
+      async runTask(type) {
+        if (type === "evaluate") {
+          return {
+            outcome: "continue",
+            rationale: "핵심 단계가 누락됨",
+          };
+        }
+
+        if (type === "followup") {
+          return {
+            text: "좋아, 그럼 microtask queue가 언제 비워지는지 설명해봐.",
+          };
+        }
+
+        throw new Error(`unexpected task: ${type}`);
+      },
+    },
+    slackClient: {
+      async postDirectMessage() {
+        throw new Error("should not be called");
+      },
+      async postThreadReply(threadTs, text) {
+        replies.push({ threadTs, text });
+        return { ok: true };
+      },
+    },
+  });
+
+  await bot.handleThreadMessage({
+    threadTs: "111.224",
+    text: "콜백 실행 시점만 기억나요.",
+    now: new Date("2026-03-10T09:06:00+09:00"),
+  });
+
+  assert.deepEqual(replies, [
+    {
+      threadTs: "111.224",
+      text: "좋아, 그럼 microtask queue가 언제 비워지는지 설명해봐.\n[debug] study-stack depth=1/5 blockedOnce=false",
+    },
+  ]);
+});
+
+test("debug 모드에서 blocked push/pop은 전환된 스택 depth/path를 즉시 출력한다", async () => {
+  const store = createInMemoryStore();
+  store.threads.set(
+    "111.225",
+    createThreadState({
+      slackThreadTs: "111.225",
+      topicId: "flaky-test",
+      openedAt: new Date("2026-03-10T09:00:00+09:00"),
+      lastAssistantPrompt: "플래키 테스트가 뭐야?",
+      lastChallengePrompt: "플래키 테스트가 뭐야?",
+      directQaStack: {
+        frames: [
+          {
+            id: "root",
+            prompt: "플래키 테스트가 뭐야?",
+            weakPassUsed: false,
+            createdAt: "2026-03-10T00:00:00.000Z",
+          },
+        ],
+        sealed: false,
+        maxDepth: 5,
+      },
+      directQaStackSealed: false,
+      studyQuestionRound: 1,
+      studyQuestionRoundLimit: 5,
+    }),
+  );
+
+  const replies = [];
+  let evaluateCallCount = 0;
+  const bot = new TutorBot({
+    store,
+    topics: [],
+    includeStudyStackDebug: true,
+    llmRunner: {
+      async runTask(type) {
+        if (type === "evaluate") {
+          evaluateCallCount += 1;
+          if (evaluateCallCount === 1) {
+            return {
+              outcome: "blocked",
+              rationale: "정의가 비어 있음",
+            };
+          }
+
+          return {
+            outcome: "mastered",
+            text: "흥, 정의 하나는 겨우 맞췄네.",
+          };
+        }
+
+        if (type === "teach") {
+          return {
+            text: "이 정도도 막히네. 정의부터 다시 잡자.",
+            challengePrompt: "플래키 테스트는 어떤 테스트야?",
+          };
+        }
+
+        throw new Error(`unexpected task: ${type}`);
+      },
+    },
+    slackClient: {
+      async postDirectMessage() {
+        throw new Error("should not be called");
+      },
+      async postThreadReply(threadTs, text) {
+        replies.push({ threadTs, text });
+        return { ok: true };
+      },
+    },
+  });
+
+  await bot.handleThreadMessage({
+    threadTs: "111.225",
+    text: "몰라",
+    now: new Date("2026-03-10T09:01:00+09:00"),
+  });
+
+  await bot.handleThreadMessage({
+    threadTs: "111.225",
+    text: "코드가 안 바뀌었는데도 통과/실패가 달라지는 테스트",
+    now: new Date("2026-03-10T09:02:00+09:00"),
+  });
+
+  assert.deepEqual(replies, [
+    {
+      threadTs: "111.225",
+      text: "이 정도도 막히네. 정의부터 다시 잡자.\n[debug] study-stack depth=2/5 blockedOnce=true path=플래키 테스트가 뭐야? > 플래키 테스트는 어떤 테스트야?",
+    },
+    {
+      threadTs: "111.225",
+      text: "플래키 테스트는 어떤 테스트야?\n[debug] study-stack depth=2/5 blockedOnce=true path=플래키 테스트가 뭐야? > 플래키 테스트는 어떤 테스트야?",
+    },
+    {
+      threadTs: "111.225",
+      text: "흥, 정의 하나는 겨우 맞췄네.\n[debug] study-stack depth=1/5 blockedOnce=true path=플래키 테스트가 뭐야?",
+    },
+    {
+      threadTs: "111.225",
+      text: "플래키 테스트가 뭐야?\n[debug] study-stack depth=1/5 blockedOnce=true path=플래키 테스트가 뭐야?",
+    },
+  ]);
+});
+
 test("사용자가 명시적으로 막혔다고 하면 continue 평가여도 blocked teaching 상태로 유지한다", async () => {
   const store = createInMemoryStore();
   store.threads.set(
@@ -1806,6 +2016,181 @@ test("모호한 지시어 counterquestion도 직전 질문(lastAssistantPrompt)�
   );
 });
 
+test("study 스레드는 1라운드에서 mastered면 즉시 패스 처리하고 닫는다", async () => {
+  const store = createInMemoryStore();
+  store.topics.set("rendering", {
+    id: "rendering",
+    title: "Rendering",
+    category: "frontend",
+    promptSeed: "Explain rendering pipeline.",
+    weight: 3,
+    createdAt: new Date("2026-03-10T08:55:00+09:00"),
+    lastUsedAt: null,
+  });
+  store.threads.set(
+    "111.443",
+    createThreadState({
+      slackThreadTs: "111.443",
+      topicId: "rendering",
+      openedAt: new Date("2026-03-10T09:00:00+09:00"),
+      lastAssistantPrompt: "layout, paint, composite 차이를 말해봐.",
+      lastChallengePrompt: "layout, paint, composite 차이를 말해봐.",
+      studyQuestionRound: 1,
+      studyQuestionRoundLimit: 5,
+    }),
+  );
+
+  const replies = [];
+  const llmCalls = [];
+  const bot = new TutorBot({
+    store,
+    topics: [],
+    llmRunner: {
+      async runTask(type, payload) {
+        llmCalls.push({ type, payload });
+        if (type === "evaluate") {
+          return {
+            outcome: "mastered",
+            text: "흥, 이번 라운드는 통과다.",
+          };
+        }
+
+        throw new Error(`unexpected task: ${type}`);
+      },
+    },
+    slackClient: {
+      async postDirectMessage() {
+        throw new Error("should not be called");
+      },
+      async postThreadReply(threadTs, text) {
+        replies.push({ threadTs, text });
+        return { ok: true };
+      },
+    },
+  });
+
+  const result = await bot.handleThreadMessage({
+    threadTs: "111.443",
+    text: "layout은 배치, paint는 픽셀 채움, composite는 레이어 합성입니다.",
+    now: new Date("2026-03-10T09:05:00+09:00"),
+  });
+
+  assert.deepEqual(llmCalls.map(({ type }) => type), [
+    "evaluate",
+  ]);
+  assert.deepEqual(replies, [
+    {
+      threadTs: "111.443",
+      text: "흥, 이번 라운드는 통과다.",
+    },
+  ]);
+  assert.equal(result.thread.status, "mastered");
+  assert.equal(result.thread.studyQuestionRound, 1);
+  assert.equal(result.thread.studyQuestionRoundLimit, 5);
+  assert.equal(result.thread.lastChallengePrompt, "layout, paint, composite 차이를 말해봐.");
+  assert.equal(result.thread.blockedOnce, false);
+  assert.equal(store.memories.get("rendering")?.learningState, "mastered_clean");
+  assert.equal(result.shouldScheduleNextQuestion, true);
+});
+
+test("study 스택은 blocked에서 push되고 하위 질문 mastered 시 pop되어 상위 질문으로 복귀한다", async () => {
+  const store = createInMemoryStore();
+  store.threads.set(
+    "111.447",
+    createThreadState({
+      slackThreadTs: "111.447",
+      topicId: "tls",
+      openedAt: new Date("2026-03-10T09:00:00+09:00"),
+      lastAssistantPrompt: "TLS 핸드셰이크가 뭐야?",
+      lastChallengePrompt: "TLS 핸드셰이크가 뭐야?",
+      directQaStack: {
+        frames: [
+          {
+            id: "root",
+            prompt: "TLS 핸드셰이크가 뭐야?",
+            weakPassUsed: false,
+            createdAt: "2026-03-10T00:00:00.000Z",
+          },
+        ],
+        sealed: false,
+        maxDepth: 5,
+      },
+      directQaStackSealed: false,
+      studyQuestionRound: 1,
+      studyQuestionRoundLimit: 5,
+    }),
+  );
+
+  const replies = [];
+  let evaluateCallCount = 0;
+  const bot = new TutorBot({
+    store,
+    topics: [],
+    llmRunner: {
+      async runTask(type) {
+        if (type === "evaluate") {
+          evaluateCallCount += 1;
+          if (evaluateCallCount === 1) {
+            return {
+              outcome: "blocked",
+              rationale: "핵심 용어가 비어 있음",
+            };
+          }
+          return {
+            outcome: "mastered",
+            text: "좋아, 하위 개념은 맞췄다.",
+          };
+        }
+
+        if (type === "teach") {
+          return {
+            text: "핵심부터 다시 잡자.",
+            challengePrompt: "TLS가 뭐야?",
+          };
+        }
+
+        throw new Error(`unexpected task: ${type}`);
+      },
+    },
+    slackClient: {
+      async postDirectMessage() {
+        throw new Error("should not be called");
+      },
+      async postThreadReply(threadTs, text) {
+        replies.push({ threadTs, text });
+        return { ok: true };
+      },
+    },
+  });
+
+  const blockedResult = await bot.handleThreadMessage({
+    threadTs: "111.447",
+    text: "잘 모르겠어",
+    now: new Date("2026-03-10T09:05:00+09:00"),
+  });
+  assert.equal(blockedResult.thread.status, "open");
+  assert.equal(blockedResult.thread.directQaStack?.frames?.length, 2);
+  assert.equal(blockedResult.thread.lastChallengePrompt, "TLS가 뭐야?");
+  assert.equal(blockedResult.thread.studyQuestionRound, 2);
+
+  const recoveredResult = await bot.handleThreadMessage({
+    threadTs: "111.447",
+    text: "TLS는 전송 계층 보안 프로토콜이야.",
+    now: new Date("2026-03-10T09:06:00+09:00"),
+  });
+  assert.equal(recoveredResult.thread.status, "open");
+  assert.equal(recoveredResult.thread.directQaStack?.frames?.length, 1);
+  assert.equal(recoveredResult.thread.lastChallengePrompt, "TLS 핸드셰이크가 뭐야?");
+  assert.equal(recoveredResult.thread.studyQuestionRound, 1);
+  assert.equal(recoveredResult.shouldScheduleNextQuestion, false);
+  assert.deepEqual(replies, [
+    { threadTs: "111.447", text: "핵심부터 다시 잡자." },
+    { threadTs: "111.447", text: "TLS가 뭐야?" },
+    { threadTs: "111.447", text: "좋아, 하위 개념은 맞췄다." },
+    { threadTs: "111.447", text: "TLS 핸드셰이크가 뭐야?" },
+  ]);
+});
+
 test("평가 결과가 mastered면 clean mastery 상태 답글 후 스레드를 닫고 다음 질문 예약 신호를 반환한다", async () => {
   const store = createInMemoryStore();
   store.threads.set(
@@ -1814,6 +2199,8 @@ test("평가 결과가 mastered면 clean mastery 상태 답글 후 스레드를 
       slackThreadTs: "111.444",
       topicId: "rendering",
       openedAt: new Date("2026-03-10T09:00:00+09:00"),
+      studyQuestionRound: 5,
+      studyQuestionRoundLimit: 5,
     }),
   );
 
@@ -1877,6 +2264,8 @@ test("blocked를 거친 뒤 mastered면 recovered mastery 상태 답글을 남�
     slackThreadTs: "111.555",
     topicId: "btree",
     openedAt: new Date("2026-03-10T09:00:00+09:00"),
+    studyQuestionRound: 5,
+    studyQuestionRoundLimit: 5,
   });
   store.threads.set("111.555", {
     ...thread,
@@ -1947,6 +2336,8 @@ test("같은 topic에서 blocked 후 recovered mastery면 누적 카운터가 �
       topicId: "event-loop",
       openedAt: new Date("2026-03-10T09:00:00+09:00"),
       blockedOnce: true,
+      studyQuestionRound: 5,
+      studyQuestionRoundLimit: 5,
     }),
   );
 

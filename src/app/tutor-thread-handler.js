@@ -1,9 +1,16 @@
 import { looksLikeCounterQuestion } from "./counter-question.js";
+import { appendStudyStackDebugText } from "./study-stack-debug.js";
 import {
   closeThread,
   markThreadAsCounterQuestion,
   resolveCounterQuestion,
 } from "../domain/thread-policy.js";
+import {
+  applyDirectQaOperation,
+  createDirectQaStackState,
+  getDirectQaTopPrompt,
+  normalizeDirectQaStackState,
+} from "../domain/direct-qa-stack-policy.js";
 import {
   createEmptyTopicMemory,
   updateTopicMemory,
@@ -18,8 +25,12 @@ export function createTutorThreadHandler({
   store,
   llmRunner,
   slackClient,
+  includeStudyStackDebug = false,
   logger = NOOP_LOGGER,
 }) {
+  const decorateStudyMessage = (text, threadLike) =>
+    appendStudyStackDebugText(text, threadLike, includeStudyStackDebug);
+
   async function handleThreadMessage({ threadTs, text, now = new Date() }) {
     const thread = await store.getThread(threadTs);
 
@@ -38,7 +49,12 @@ export function createTutorThreadHandler({
       return null;
     }
 
-    const repliedThread = applyUserReplyMetadata(thread, now);
+    const stackReadyThread = normalizeStudyThreadStack(thread, now);
+    if (stackReadyThread !== thread) {
+      await store.saveThread(stackReadyThread);
+    }
+
+    const repliedThread = applyUserReplyMetadata(stackReadyThread, now);
     await store.saveThread(repliedThread);
 
     if (looksLikeCounterQuestion(text)) {
@@ -53,7 +69,7 @@ export function createTutorThreadHandler({
         codexSessionId: counterThread.codexSessionId ?? null,
       });
 
-      await slackClient.postThreadReply(threadTs, answer.text);
+      await slackClient.postThreadReply(threadTs, decorateStudyMessage(answer.text, repliedThread));
 
       const resolvedThread = answer.resolved === false
         ? counterThread
@@ -106,21 +122,17 @@ export function createTutorThreadHandler({
       rationale: normalizedEvaluation.rationale ?? null,
     });
 
-    const masteryKind = normalizedEvaluation.outcome === "mastered"
-      ? (sessionBoundThread.blockedOnce ? "recovered" : "clean")
-      : undefined;
-    const nextMemory = updateTopicMemory(
-      currentMemory,
-      normalizedEvaluation.outcome,
-      now,
-      {
-        ...(masteryKind ? { masteryKind } : {}),
-        lastMisconceptionSummary: normalizedEvaluation.misconceptionSummary ?? null,
-      },
-    );
-    await store.saveTopicMemory(repliedThread.topicId, nextMemory);
-
     if (normalizedEvaluation.outcome === "continue") {
+      const continuedMemory = updateTopicMemory(
+        currentMemory,
+        "continue",
+        now,
+        {
+          lastMisconceptionSummary: normalizedEvaluation.misconceptionSummary ?? null,
+        },
+      );
+      await store.saveTopicMemory(repliedThread.topicId, continuedMemory);
+
       const followUp = await llmRunner.runTask("followup", {
         thread: sessionBoundThread,
         text,
@@ -134,25 +146,51 @@ export function createTutorThreadHandler({
         previousMisconceptionSummary: retrievalContext.previousMisconceptionSummary,
         previousTeachingSummary: retrievalContext.previousTeachingSummary,
       });
+      const followUpPrompt = normalizeChallengePrompt(
+        followUp.challengePrompt,
+        followUp.text,
+      );
+      const transitioned = applyStudyStackTransition(sessionBoundThread, {
+        operation: "stay",
+        nextPrompt: followUpPrompt,
+        now,
+      });
+      const activePrompt = getDirectQaTopPrompt(transitioned.stack) ?? followUpPrompt;
+      const continuedThread = applyStudyStackState(
+        setThreadPrompts(
+          mergeCodexSessionId(sessionBoundThread, followUp.codexSessionId),
+          {
+            assistantPrompt: followUp.text,
+            challengePrompt: activePrompt,
+          },
+        ),
+        transitioned.stack,
+      );
 
-      await slackClient.postThreadReply(threadTs, followUp.text);
-      const continuedThread = setThreadPrompts(
-        mergeCodexSessionId(sessionBoundThread, followUp.codexSessionId),
-        {
-          assistantPrompt: followUp.text,
-          challengePrompt: followUp.challengePrompt ?? followUp.text,
-        },
+      await slackClient.postThreadReply(
+        threadTs,
+        decorateStudyMessage(followUp.text, continuedThread),
       );
       const waitingThread = applyAwaitingUserReplyMetadata(continuedThread, now);
       await store.saveThread(waitingThread);
       return {
         thread: waitingThread,
-        memory: nextMemory,
+        memory: continuedMemory,
         shouldScheduleNextQuestion: false,
       };
     }
 
     if (normalizedEvaluation.outcome === "blocked") {
+      const blockedBaseMemory = updateTopicMemory(
+        currentMemory,
+        "blocked",
+        now,
+        {
+          lastMisconceptionSummary: normalizedEvaluation.misconceptionSummary ?? null,
+        },
+      );
+      await store.saveTopicMemory(repliedThread.topicId, blockedBaseMemory);
+
       const teaching = await llmRunner.runTask("teach", {
         thread: sessionBoundThread,
         text,
@@ -175,10 +213,10 @@ export function createTutorThreadHandler({
       const challengeSummary = normalizeTextOrNull(teaching.challengeSummary ?? challengePrompt);
       const blockedMemory = teachingSummary
         ? {
-          ...nextMemory,
+          ...blockedBaseMemory,
           lastTeachingSummary: teachingSummary,
         }
-        : nextMemory;
+        : blockedBaseMemory;
 
       if (typeof store.saveTeachingMemory === "function" && teachingSummary) {
         await store.saveTeachingMemory({
@@ -189,23 +227,46 @@ export function createTutorThreadHandler({
           createdAt: now,
         });
       }
-      if (blockedMemory !== nextMemory) {
+      if (blockedMemory !== blockedBaseMemory) {
         await store.saveTopicMemory(repliedThread.topicId, blockedMemory);
       }
-      await slackClient.postThreadReply(threadTs, teaching.text);
-      if (challengePrompt && challengePrompt !== teaching.text) {
-        await slackClient.postThreadReply(threadTs, challengePrompt);
-      }
-      const blockedThread = setThreadPrompts(
+
+      const transitioned = applyStudyStackTransition(
         {
-          ...mergeCodexSessionId(sessionBoundThread, teaching.codexSessionId),
+          ...sessionBoundThread,
           blockedOnce: true,
         },
         {
-          assistantPrompt: teaching.text,
-          challengePrompt,
+          operation: "push",
+          nextPrompt: challengePrompt,
+          now,
         },
       );
+      const activePrompt = getDirectQaTopPrompt(transitioned.stack) ?? challengePrompt;
+      const blockedThread = applyStudyStackState(
+        setThreadPrompts(
+          {
+            ...mergeCodexSessionId(sessionBoundThread, teaching.codexSessionId),
+            blockedOnce: true,
+          },
+          {
+            assistantPrompt: teaching.text,
+            challengePrompt: activePrompt,
+          },
+        ),
+        transitioned.stack,
+      );
+
+      await slackClient.postThreadReply(
+        threadTs,
+        decorateStudyMessage(teaching.text, blockedThread),
+      );
+      if (activePrompt && activePrompt !== teaching.text) {
+        await slackClient.postThreadReply(
+          threadTs,
+          decorateStudyMessage(activePrompt, blockedThread),
+        );
+      }
       const waitingBlockedThread = applyAwaitingUserReplyMetadata(blockedThread, now);
       await store.saveThread(waitingBlockedThread);
       return {
@@ -217,14 +278,74 @@ export function createTutorThreadHandler({
 
     const reply = normalizeTextOrNull(normalizedEvaluation.text)
       ?? "흥, 이번엔 넘어간다. 다음엔 더 깊게 물어볼 거야.";
-    await slackClient.postThreadReply(threadTs, reply);
-    const closedThread = closeThread(sessionBoundThread, "mastered", now);
-    await store.saveThread(closedThread);
+    const transitioned = applyStudyStackTransition(sessionBoundThread, {
+      operation: "pop",
+      passQuality: "strong",
+      now,
+    });
+    const poppedThread = applyStudyStackState(sessionBoundThread, transitioned.stack);
+
+    await slackClient.postThreadReply(threadTs, decorateStudyMessage(reply, poppedThread));
+
+    if (transitioned.shouldClose) {
+      const masteryKind = sessionBoundThread.blockedOnce ? "recovered" : "clean";
+      const masteredMemory = updateTopicMemory(
+        currentMemory,
+        "mastered",
+        now,
+        {
+          masteryKind,
+          lastMisconceptionSummary: normalizedEvaluation.misconceptionSummary ?? null,
+        },
+      );
+      await store.saveTopicMemory(repliedThread.topicId, masteredMemory);
+
+      const closedThread = closeThread(
+        poppedThread,
+        "mastered",
+        now,
+      );
+      await store.saveThread(closedThread);
+      return {
+        thread: closedThread,
+        memory: masteredMemory,
+        masteryKind,
+        shouldScheduleNextQuestion: true,
+      };
+    }
+
+    const resumedPrompt = getDirectQaTopPrompt(transitioned.stack);
+    const resumedMemory = updateTopicMemory(
+      currentMemory,
+      "continue",
+      now,
+      {
+        lastMisconceptionSummary: normalizedEvaluation.misconceptionSummary ?? null,
+      },
+    );
+    await store.saveTopicMemory(repliedThread.topicId, resumedMemory);
+
+    if (resumedPrompt) {
+      const resumedPromptThread = setThreadPrompts(poppedThread, {
+        assistantPrompt: resumedPrompt,
+        challengePrompt: resumedPrompt,
+      });
+      await slackClient.postThreadReply(
+        threadTs,
+        decorateStudyMessage(resumedPrompt, resumedPromptThread),
+      );
+    }
+
+    const resumedThread = setThreadPrompts(poppedThread, {
+      assistantPrompt: resumedPrompt,
+      challengePrompt: resumedPrompt,
+    });
+    const waitingResumedThread = applyAwaitingUserReplyMetadata(resumedThread, now);
+    await store.saveThread(waitingResumedThread);
     return {
-      thread: closedThread,
-      memory: nextMemory,
-      masteryKind,
-      shouldScheduleNextQuestion: true,
+      thread: waitingResumedThread,
+      memory: resumedMemory,
+      shouldScheduleNextQuestion: false,
     };
   }
 
@@ -301,6 +422,83 @@ function normalizeTextOrNull(value) {
 
   const normalized = value.trim();
   return normalized || null;
+}
+
+function normalizeStudyThreadStack(thread, now) {
+  if ((thread?.kind ?? "study") !== "study") {
+    return thread;
+  }
+
+  const currentStack = normalizeDirectQaStackState(thread.directQaStack ?? createDirectQaStackState());
+  if (thread.directQaStackSealed === true) {
+    currentStack.sealed = true;
+  }
+
+  const fallbackPrompt = normalizeChallengePrompt(
+    thread.lastChallengePrompt,
+    thread.lastAssistantPrompt,
+  );
+  const needsRootPrompt = currentStack.frames.length === 0 && Boolean(fallbackPrompt);
+  const transitioned = needsRootPrompt
+    ? applyDirectQaOperation(currentStack, {
+      operation: "push",
+      nextPrompt: fallbackPrompt,
+      now,
+    })
+    : {
+      stack: currentStack,
+    };
+
+  const nextStack = transitioned.stack;
+  const topPrompt = getDirectQaTopPrompt(nextStack);
+  const round = Math.max(1, nextStack.frames.length || 1);
+  const roundLimit = Math.max(1, nextStack.maxDepth || 5);
+  const hasChanged = needsRootPrompt
+    || !thread.directQaStack
+    || thread.directQaStackSealed !== nextStack.sealed
+    || thread.studyQuestionRound !== round
+    || thread.studyQuestionRoundLimit !== roundLimit
+    || (topPrompt && thread.lastChallengePrompt !== topPrompt);
+
+  if (!hasChanged) {
+    return thread;
+  }
+
+  return {
+    ...thread,
+    directQaStack: nextStack,
+    directQaStackSealed: nextStack.sealed,
+    studyQuestionRound: round,
+    studyQuestionRoundLimit: roundLimit,
+    lastChallengePrompt: topPrompt ?? thread.lastChallengePrompt ?? null,
+  };
+}
+
+function applyStudyStackTransition(thread, { operation, nextPrompt = null, passQuality = null, now }) {
+  const normalizedThread = normalizeStudyThreadStack(thread, now);
+  return applyDirectQaOperation(normalizedThread.directQaStack, {
+    operation,
+    nextPrompt,
+    passQuality,
+    now,
+  });
+}
+
+function applyStudyStackState(thread, stack) {
+  if ((thread?.kind ?? "study") !== "study") {
+    return thread;
+  }
+
+  const topPrompt = getDirectQaTopPrompt(stack);
+
+  return {
+    ...thread,
+    directQaStack: stack,
+    directQaStackSealed: stack.sealed,
+    studyQuestionRound: Math.max(1, stack.frames.length || 1),
+    studyQuestionRoundLimit: Math.max(1, stack.maxDepth || 5),
+    lastChallengePrompt: topPrompt ?? thread.lastChallengePrompt ?? null,
+  };
 }
 
 function applyUserReplyMetadata(thread, now) {
