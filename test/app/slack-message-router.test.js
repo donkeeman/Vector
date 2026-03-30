@@ -926,6 +926,19 @@ test("awaiting_answer 상태의 direct_qa reply도 direct_thread_turn으로 라�
     directQaState: "awaiting_answer",
     lastAssistantPrompt: "[3, 4] 벡터의 길이는 얼마지?",
     lastChallengePrompt: "[3, 4] 벡터의 길이는 얼마지?",
+    directQaStack: {
+      frames: [
+        {
+          id: "root",
+          prompt: "[3, 4] 벡터의 길이는 얼마지?",
+          weakPassUsed: false,
+          createdAt: "2026-03-10T08:01:02.000Z",
+        },
+      ],
+      sealed: false,
+      maxDepth: 5,
+    },
+    directQaStackSealed: false,
     openedAt: new Date("2026-03-10T17:01:00+09:00"),
     closedAt: null,
     lastCounterQuestionAt: null,
@@ -955,8 +968,8 @@ test("awaiting_answer 상태의 direct_qa reply도 direct_thread_turn으로 라�
         calls.push({ type, payload });
         return {
           text: "아, 역시 거기서 무너지는구나. [3, 4]의 길이는 5다.",
-          nextState: "open",
-          challengePrompt: null,
+          operation: "pop",
+          passQuality: "strong",
           codexSessionId: "thread-123",
         };
       },
@@ -1001,8 +1014,79 @@ test("awaiting_answer 상태의 direct_qa reply도 direct_thread_turn으로 라�
       text: "아, 역시 거기서 무너지는구나. [3, 4]의 길이는 5다.",
     },
   ]);
+  assert.equal(store.threads.get("1000.92")?.status, "mastered");
+  assert.equal(store.threads.get("1000.92")?.directQaStack?.frames?.length, 0);
+  assert.ok(store.threads.get("1000.92")?.closedAt instanceof Date);
   assert.equal(store.threads.get("1000.92")?.directQaState, "open");
   assert.equal(store.threads.get("1000.92")?.mode, "direct_qa");
+});
+
+test("sealed=true인 direct_qa 스택은 push 요청을 차단하고 top 질문을 유지한다", async () => {
+  const slackClient = createSlackClient();
+  const store = createStore();
+  const thread = {
+    slackThreadTs: "1000.93",
+    topicId: null,
+    kind: "direct_qa",
+    mode: "direct_qa",
+    status: "open",
+    codexSessionId: "thread-999",
+    directQaState: "awaiting_answer",
+    lastAssistantPrompt: "Q5",
+    lastChallengePrompt: "Q5",
+    directQaStack: {
+      frames: [
+        { id: "f1", prompt: "Q1", weakPassUsed: false, createdAt: null },
+        { id: "f2", prompt: "Q2", weakPassUsed: false, createdAt: null },
+        { id: "f3", prompt: "Q3", weakPassUsed: false, createdAt: null },
+        { id: "f4", prompt: "Q4", weakPassUsed: false, createdAt: null },
+        { id: "f5", prompt: "Q5", weakPassUsed: false, createdAt: null },
+      ],
+      sealed: true,
+      maxDepth: 5,
+    },
+    directQaStackSealed: true,
+    openedAt: new Date("2026-03-10T17:01:00+09:00"),
+    closedAt: null,
+    lastCounterQuestionAt: null,
+    lastCounterQuestionResolvedAt: null,
+  };
+  store.threads.set("1000.93", thread);
+  store.directQaMessages.set("1000.93", []);
+
+  const router = new SlackMessageRouter({
+    store,
+    tutorBot: createTutorBot(),
+    llmRunner: {
+      async runTask() {
+        return {
+          text: "좋아, 그럼 다음 질문이다.",
+          operation: "push",
+          nextPrompt: "Q6",
+          codexSessionId: "thread-999",
+        };
+      },
+    },
+    slackClient,
+    now: () => new Date("2026-03-10T17:02:00+09:00"),
+  });
+
+  await router.handleMessageEvent({
+    type: "message",
+    channel_type: "im",
+    channel: "D123",
+    user: "U123",
+    text: "답은 5야",
+    ts: "1001.3",
+    thread_ts: "1000.93",
+  });
+
+  const updated = store.threads.get("1000.93");
+  assert.equal(updated?.status, "open");
+  assert.equal(updated?.directQaStack?.frames?.length, 5);
+  assert.equal(updated?.directQaStack?.sealed, true);
+  assert.equal(updated?.lastChallengePrompt, "Q5");
+  assert.equal(updated?.directQaState, "awaiting_answer");
 });
 
 test("direct_qa 스레드의 비기술 질문도 로컬 차단 없이 direct_thread_turn으로 넘긴다", async () => {

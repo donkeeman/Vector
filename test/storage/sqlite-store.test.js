@@ -32,6 +32,19 @@ test("sqlite store는 direct_qa thread와 message history를 저장하고 읽는
       directQaState: "open",
       lastAssistantPrompt: "벡터가 뭐야?",
       lastChallengePrompt: "[3, 4] 벡터의 길이는 얼마지?",
+      directQaStack: {
+        frames: [
+          {
+            id: "root",
+            prompt: "[3, 4] 벡터의 길이는 얼마지?",
+            weakPassUsed: false,
+            createdAt: "2026-03-11T11:00:00.000Z",
+          },
+        ],
+        sealed: false,
+        maxDepth: 5,
+      },
+      directQaStackSealed: false,
     });
     await store.saveDirectQaMessage({
       threadTs: "2000.1",
@@ -49,6 +62,11 @@ test("sqlite store는 direct_qa thread와 message history를 저장하고 읽는
     assert.equal(thread.directQaState, "open");
     assert.equal(thread.lastAssistantPrompt, "벡터가 뭐야?");
     assert.equal(thread.lastChallengePrompt, "[3, 4] 벡터의 길이는 얼마지?");
+    assert.equal(thread.directQaStack?.frames?.length, 1);
+    assert.equal(thread.directQaStack?.frames?.[0]?.prompt, "[3, 4] 벡터의 길이는 얼마지?");
+    assert.equal(thread.directQaStack?.sealed, false);
+    assert.equal(thread.directQaStack?.maxDepth, 5);
+    assert.equal(thread.directQaStackSealed, false);
     assert.equal(thread.blockedOnce, false);
     assert.deepEqual(
       history.map(({ threadTs, role, text }) => ({ threadTs, role, text })),

@@ -1,3 +1,5 @@
+import { createDirectQaStackState } from "./direct-qa-stack-policy.js";
+
 export function createThreadState({
   slackThreadTs,
   topicId = null,
@@ -9,6 +11,8 @@ export function createThreadState({
   directQaState = kind === "direct_qa" ? "open" : null,
   lastAssistantPrompt = null,
   lastChallengePrompt = lastAssistantPrompt,
+  directQaStack = kind === "direct_qa" ? createDirectQaStackState() : null,
+  directQaStackSealed = Boolean(directQaStack?.sealed),
   awaitingUserReplyAt = kind === "study" ? openedAt : null,
   lastUserReplyAt = null,
   reminderSentAt = null,
@@ -28,6 +32,8 @@ export function createThreadState({
     directQaState,
     lastAssistantPrompt,
     lastChallengePrompt,
+    directQaStack,
+    directQaStackSealed,
     awaitingUserReplyAt,
     lastUserReplyAt,
     reminderSentAt,

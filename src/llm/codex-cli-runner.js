@@ -96,7 +96,8 @@ function buildTaskInstructions(taskType) {
 function parseTaskResult(taskType, raw) {
   const parsed = parseJsonObject(raw.outputText);
   const questionNormalized = normalizeSingleQuestionTasks(taskType, parsed);
-  const normalized = normalizeReplyStyle(taskType, questionNormalized);
+  const directQaNormalized = normalizeDirectQaOperationContract(taskType, questionNormalized);
+  const normalized = normalizeReplyStyle(taskType, directQaNormalized);
 
   if (!isSessionAwareTask(taskType)) {
     return normalized;
@@ -183,19 +184,19 @@ const TASK_INSTRUCTIONS = {
   topic:
     'Return {"topic":{"id":"kebab-case-id","title":"...","category":"...","promptSeed":"...","weight":1-10}} for a new CS/dev learning topic. Avoid duplicates with existingTopics/recentTopics. Pick broad computer-science or adjacent engineering topics (os, network, database, language runtime, distributed systems, security, tooling, testing, architecture). Do not output a question in this task; only topic metadata.',
   question:
-    'Return {"text":"..."} with exactly one concise CS question only. Never combine two asks in one turn (no multi-part asks joined by "and" equivalents). If payload.topicMemory is null or topicMemory.attemptCount is 0, ask a foundational concept-definition question first (for example "X가 뭐야?" level) before mechanism-heavy depth. Use payload.recentAttempts and payload.latestTeachingMemory to target the current weak point. If payload.recentAttempts indicate repeat failure or same misconception repeated, ask one focused re-check question on that exact misconception instead of pivoting broad. If you add rivalry taunt, keep it as a statement without a question mark. The only question mark must belong to the technical question. The tone must be provocative, playful, and openly competitive, like a genius rival testing weak points.',
+    'Return {"text":"..."} with exactly one concise CS question sentence only. Output only the technical question line: no preface statement, no rivalry-taunt statement, and no extra commentary before the question. Never combine two asks in one turn (no multi-part asks joined by "and" equivalents). If payload.topicMemory is null or topicMemory.attemptCount is 0, ask a foundational concept-definition question first (for example "X가 뭐야?" level) before mechanism-heavy depth. Use payload.recentAttempts and payload.latestTeachingMemory to target the current weak point. If payload.recentAttempts indicate repeat failure or same misconception repeated, ask one focused re-check question on that exact misconception instead of pivoting broad. Keep the question wording provocative, playful, and competitive without adding extra sentences.',
   evaluate:
     'Return {"outcome":"continue|blocked|mastered","rationale":"...","text":"optional closing reply when mastered"} based on the answer quality. Evaluate the user answer against thread.lastChallengePrompt first (fallback: thread.lastAssistantPrompt). Use payload.topicMemory, payload.recentAttempts, payload.latestTeachingMemory, payload.previousMisconceptionSummary, and payload.previousTeachingSummary to judge repeat failure, recovered mastery, and same misconception repeated patterns. If the latest user message explicitly says they do not know (for example "잘 모르겠어", "모르겠어", "몰라"), set outcome to blocked. If the latest user message contains ambiguous references such as "that/it/why that", resolve them to thread.lastChallengePrompt by default when available.',
   followup:
-    'Return {"text":"..."} with exactly one sharper follow-up question only. Keep the follow-up anchored to the same sub-concept as thread.lastChallengePrompt and evaluation.rationale; do not jump to a different topic. Use payload.recentAttempts and payload.previousMisconceptionSummary to keep pressure on repeat failure and same misconception repeated patterns. Never stack two follow-up asks in one message. If you add rivalry taunt, keep it as a statement without a question mark. The only question mark must belong to the technical follow-up. Keep the tone provocative and irritated, as if the user barely earned the next question.',
+    'Return {"text":"..."} with exactly one sharper follow-up question sentence only. Output only the technical follow-up question line: no preface statement, no rivalry-taunt statement, and no extra commentary before the question. Keep the follow-up anchored to the same sub-concept as thread.lastChallengePrompt and evaluation.rationale; do not jump to a different topic. Use payload.recentAttempts and payload.previousMisconceptionSummary to keep pressure on repeat failure and same misconception repeated patterns. Never stack two follow-up asks in one message. Keep the question wording provocative and irritated without adding extra sentences.',
   teach:
     'Return {"text":"...","challengePrompt":"..."} where text gives a brief correction for the exact failure point and challengePrompt gives exactly one re-check question on the same sub-concept as thread.lastChallengePrompt. Rebuild a short answer scaffold for the precise question they failed, not a generic recap. Use payload.recentAttempts, payload.latestTeachingMemory, and payload.previousMisconceptionSummary to avoid repeating the same generic explanation when the same misconception repeated. If the user explicitly says they do not know (for example "잘 모르겠어", "모르겠어", "몰라"), treat it as a learning request, not evasion: you may open with one short rivalry taunt, then immediately give a concrete explanation in 1-2 sentences before asking the re-check question. Keep the taunt about answer quality only, never about identity/intelligence. Do not use wording that frames the user as dodging (for example "회피"). If the user says "that/it/why that" ambiguously, treat it as referring to thread.lastChallengePrompt first (fallback: thread.lastAssistantPrompt) and explain directly instead of asking what it means. The tone should be sharp, slightly mocking, and competitive, not kind.',
   answer_counterquestion:
-    'Return {"text":"...","resolved":true|false}. Set resolved=false only if the user will likely continue the side question. If the user uses ambiguous references like "that/it/why that", resolve them to thread.lastChallengePrompt first (fallback: thread.lastAssistantPrompt) and answer directly. Do not bounce back with "what do you mean by that?" unless there is a real contradiction. Always reply in Korean informal speech (banmal), never honorific style. Answer in a rival tone that still keeps the discussion moving.',
+    'Return {"text":"...","resolved":true|false}. Set resolved=false only if the user will likely continue the side question. If the user uses ambiguous references like "that/it/why that", resolve them to thread.lastChallengePrompt first (fallback: thread.lastAssistantPrompt) and answer directly. Do not bounce back with "what do you mean by that?" unless there is a real contradiction. Always reply in Korean informal speech (banmal), never honorific style. Before returning, run a strict style pass and rewrite any honorific ending (for example 요/예요/이에요/죠/나요/까요/습니다/세요) into banmal. Never produce clipped pseudo-banmal by deleting only "요"; rewrite the whole ending to a natural banmal form. Answer in a rival tone that still keeps the discussion moving.',
   direct_question:
-    'The user asked a direct question in Slack DM. Interpret the latest question literally first. Do not invent confusion, hidden intent, or background that the user did not say. If a technical term overlaps with the bot name, answer the technical meaning first instead of roleplaying the ambiguity. Return {"text":"...","nextState":"open|awaiting_answer","challengePrompt":"question or null"} with a concise but sharp Vector-style answer in Korean informal speech (banmal). Never use honorific Korean endings. Do not grade the user. Keep a genius rival tone, slightly mocking and clearly competitive.',
+    'The user asked a direct question in Slack DM. Interpret the latest question literally first. Do not invent confusion, hidden intent, or background that the user did not say. If a technical term overlaps with the bot name, answer the technical meaning first instead of roleplaying the ambiguity. Return {"text":"...","nextState":"open|awaiting_answer","challengePrompt":"question or null"} with a concise but sharp Vector-style answer in Korean informal speech (banmal). Never use honorific Korean endings. Before returning, run a strict style pass and rewrite any honorific ending (for example 요/예요/이에요/죠/나요/까요/습니다/세요) into banmal. Never produce clipped pseudo-banmal by deleting only "요"; rewrite the whole ending to a natural banmal form. Do not grade the user. Keep a genius rival tone, slightly mocking and clearly competitive.',
   direct_thread_turn:
-    'The user replied inside an ongoing direct Q&A Slack thread. Use the provided history to answer the latest turn in Korean informal speech (banmal). Never use honorific Korean endings. Interpret the latest message literally first. Do not invent confusion, hidden intent, or background that the user did not say. Use the thread state, thread.lastChallengePrompt, and last assistant prompt to decide whether the latest user turn is an answer attempt, a same-context follow-up, or a pivot to a new question. Treat short paraphrase, restatement, clarification, and understanding-check turns (for example, "in other words", "so", "so you mean...?") or tentative confirm/correct attempts as same-context technical turns. If the thread is awaiting an answer, evaluate the latest user message as an answer attempt against the current challenge before anything else. Short, tentative, partial, or plainly wrong replies to the current challenge are still answer attempts. Do not reject brief answers like guesses, rough summaries, or incomplete reasoning just because they are vague. If the latest user message explicitly says they do not know, you may open with one short rivalry taunt, then explain first in 1-2 concrete sentences, then optionally ask one same-context challenge; do not frame "I do not know" as evasion or refusal. Keep the taunt about answer quality only, never about identity/intelligence. If the user gives up and pivots to a new question in the same message, briefly close the failed challenge and then answer the pivot. Return {"text":"...","nextState":"open|awaiting_answer","challengePrompt":"question or null"} only. Keep the reply provocative, tight, rival-like, and capable of handling answer attempt, same-context paraphrase confirmation, and pivot cleanly.',
+    'The user replied inside an ongoing direct Q&A Slack thread. Use the provided history to answer the latest turn in Korean informal speech (banmal). Never use honorific Korean endings. Before returning, run a strict style pass and rewrite any honorific ending (for example 요/예요/이에요/죠/나요/까요/습니다/세요) into banmal. Never produce clipped pseudo-banmal by deleting only "요"; rewrite the whole ending to a natural banmal form. Interpret the latest message literally first. Do not invent confusion, hidden intent, or background that the user did not say. Use the thread state, thread.lastChallengePrompt, and last assistant prompt to decide whether the latest user turn is an answer attempt, a same-context follow-up, or a pivot to a new question. Treat short paraphrase, restatement, clarification, and understanding-check turns (for example, "in other words", "so", "so you mean...?") or tentative confirm/correct attempts as same-context technical turns. If the thread is awaiting an answer, evaluate the latest user message as an answer attempt against the current challenge before anything else. Short, tentative, partial, or plainly wrong replies to the current challenge are still answer attempts. Do not reject brief answers like guesses, rough summaries, or incomplete reasoning just because they are vague. If the latest user message explicitly says they do not know, you may open with one short rivalry taunt, then explain first in 1-2 concrete sentences, then optionally ask one same-context challenge; do not frame "I do not know" as evasion or refusal. Keep the taunt about answer quality only, never about identity/intelligence. If the user gives up and pivots to a new question in the same message, briefly close the failed challenge and then answer the pivot. Respect payload.thread.directQaStack and payload.thread.directQaStack.sealed: once sealed is true, never request push and resolve by pop/stay only. Return {"text":"...","operation":"push|pop|stay|close","nextPrompt":"string or null","passQuality":"strong|weak|null","nextState":"open|awaiting_answer","challengePrompt":"question or null"} only. Keep the reply provocative, tight, rival-like, and capable of handling answer attempt, same-context paraphrase confirmation, and pivot cleanly.',
 };
 
 const TASK_EXECUTION_PROFILE = {
@@ -304,6 +305,67 @@ function normalizeReplyStyle(taskType, parsed) {
   return normalized;
 }
 
+function normalizeDirectQaOperationContract(taskType, parsed) {
+  if (!parsed || typeof parsed !== "object") {
+    return parsed;
+  }
+
+  if (taskType !== "direct_question" && taskType !== "direct_thread_turn") {
+    return parsed;
+  }
+
+  const operation = normalizeOperation(parsed.operation);
+  const nextPrompt = normalizeNullableText(parsed.nextPrompt);
+  const passQuality = parsed.passQuality === "weak" || parsed.passQuality === "strong"
+    ? parsed.passQuality
+    : null;
+  const legacyNextState = parsed.nextState === "awaiting_answer" ? "awaiting_answer" : "open";
+  const legacyChallengePrompt = normalizeNullableText(parsed.challengePrompt);
+
+  let normalizedOperation = operation;
+  let normalizedNextPrompt = nextPrompt;
+
+  if (!normalizedOperation) {
+    if (legacyNextState === "awaiting_answer" && legacyChallengePrompt) {
+      normalizedOperation = "push";
+      normalizedNextPrompt = normalizedNextPrompt ?? legacyChallengePrompt;
+    } else if (legacyNextState === "open" && legacyChallengePrompt) {
+      normalizedOperation = "stay";
+      normalizedNextPrompt = normalizedNextPrompt ?? legacyChallengePrompt;
+    } else {
+      normalizedOperation = "stay";
+    }
+  }
+
+  if ((normalizedOperation === "push" || normalizedOperation === "stay") && !normalizedNextPrompt) {
+    normalizedNextPrompt = legacyChallengePrompt;
+  }
+
+  return {
+    ...parsed,
+    operation: normalizedOperation,
+    nextPrompt: normalizedNextPrompt ?? null,
+    passQuality,
+  };
+}
+
+function normalizeOperation(operation) {
+  if (operation === "push" || operation === "pop" || operation === "stay" || operation === "close") {
+    return operation;
+  }
+
+  return null;
+}
+
+function normalizeNullableText(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+  return normalized ? normalized : null;
+}
+
 function keepSingleQuestion(text) {
   const compact = String(text ?? "")
     .replace(/\s+/gu, " ")
@@ -318,14 +380,37 @@ function keepSingleQuestion(text) {
 
   if (questionCandidates.length > 0) {
     const chosenQuestion = pickMainQuestionCandidate(questionCandidates);
-    const singleClause = sliceBeforeJoinedSecondAsk(chosenQuestion).trim();
+    const trimmedQuestion = stripLeadingStatementBeforeQuestion(chosenQuestion);
+    const singleClause = sliceBeforeJoinedSecondAsk(trimmedQuestion).trim();
 
-    return singleClause || chosenQuestion;
+    return singleClause || trimmedQuestion;
   }
 
   const singleClause = sliceBeforeJoinedSecondAsk(firstLine).trim();
 
   return singleClause || firstLine;
+}
+
+function stripLeadingStatementBeforeQuestion(text) {
+  const normalized = String(text ?? "").trim();
+  if (!/[?？]/u.test(normalized)) {
+    return normalized;
+  }
+
+  const questionChunk = normalized.match(/[^?？]+[?？]/u)?.[0]?.trim() ?? normalized;
+  let pivot = -1;
+  for (const match of questionChunk.matchAll(/[.!…](?=\s+)/gu)) {
+    if (typeof match.index === "number") {
+      pivot = match.index;
+    }
+  }
+
+  if (pivot < 0) {
+    return questionChunk;
+  }
+
+  const stripped = questionChunk.slice(pivot + 1).trim();
+  return stripped || questionChunk;
 }
 
 function extractQuestionCandidates(text) {
@@ -369,24 +454,44 @@ function normalizeBanmalText(text) {
   }
 
   let normalized = raw;
+  const endingBoundary = String.raw`(?=\s*(?:["'”’)\]]*[.!?,…~]|$))`;
+  const questionBoundary = String.raw`(?=\s*(?:["'”’)\]]*[?!]|$))`;
   const replacements = [
-    [/입니다(?=[.!?]|$)/gu, "이야"],
-    [/있습니다(?=[.!?]|$)/gu, "있어"],
-    [/없습니다(?=[.!?]|$)/gu, "없어"],
-    [/됩니다(?=[.!?]|$)/gu, "돼"],
-    [/가능합니다(?=[.!?]|$)/gu, "가능해"],
-    [/합니다(?=[.!?]|$)/gu, "해"],
-    [/해주세요(?=[.!?]|$)/gu, "해줘"],
-    [/해보세요(?=[.!?]|$)/gu, "해봐"],
-    [/하세요(?=[.!?]|$)/gu, "해"],
-    [/십시오(?=[.!?]|$)/gu, "해"],
+    [new RegExp(`이죠${endingBoundary}`, "gu"), "이지"],
+    [new RegExp(`죠${endingBoundary}`, "gu"), "지"],
+    [new RegExp(`뭐예요${questionBoundary}`, "gu"), "뭐야"],
+    [new RegExp(`뭐예${questionBoundary}`, "gu"), "뭐야"],
+    [new RegExp(`이에요${endingBoundary}`, "gu"), "이야"],
+    [new RegExp(`예요${endingBoundary}`, "gu"), "야"],
+    [new RegExp(`입니다${endingBoundary}`, "gu"), "이야"],
+    [new RegExp(`있습니다${endingBoundary}`, "gu"), "있어"],
+    [new RegExp(`없습니다${endingBoundary}`, "gu"), "없어"],
+    [new RegExp(`알겠습니다${endingBoundary}`, "gu"), "알겠어"],
+    [new RegExp(`겠습니다${endingBoundary}`, "gu"), "겠어"],
+    [new RegExp(`겠어요${endingBoundary}`, "gu"), "겠어"],
+    [new RegExp(`됩니다${endingBoundary}`, "gu"), "돼"],
+    [new RegExp(`가능합니다${endingBoundary}`, "gu"), "가능해"],
+    [new RegExp(`합니다${endingBoundary}`, "gu"), "해"],
+    [new RegExp(`해주세요${endingBoundary}`, "gu"), "해줘"],
+    [new RegExp(`해보세요${endingBoundary}`, "gu"), "해봐"],
+    [new RegExp(`하세요${endingBoundary}`, "gu"), "해"],
+    [new RegExp(`십시오${endingBoundary}`, "gu"), "해"],
+    [new RegExp(`인가요${endingBoundary}`, "gu"), "인가"],
+    [new RegExp(`나요${questionBoundary}`, "gu"), "나"],
+    [new RegExp(`까요${questionBoundary}`, "gu"), "까"],
+    [new RegExp(`해요${endingBoundary}`, "gu"), "해"],
+    [new RegExp(`돼요${endingBoundary}`, "gu"), "돼"],
+    [new RegExp(`있어요${endingBoundary}`, "gu"), "있어"],
+    [new RegExp(`없어요${endingBoundary}`, "gu"), "없어"],
+    [new RegExp(`맞아요${endingBoundary}`, "gu"), "맞아"],
+    [new RegExp(`아니에요${endingBoundary}`, "gu"), "아니야"],
+    [new RegExp(`그래요${endingBoundary}`, "gu"), "그래"],
   ];
 
   for (const [pattern, replacement] of replacements) {
     normalized = normalized.replace(pattern, replacement);
   }
 
-  normalized = normalized.replace(/(요)(?=[.!?])/gu, "");
   normalized = normalized.replace(/요$/gu, "");
 
   return normalized;
