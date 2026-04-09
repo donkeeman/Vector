@@ -28,6 +28,7 @@ export class SqliteStore {
       CREATE TABLE IF NOT EXISTS topic_memory (
         topic_id TEXT PRIMARY KEY,
         learning_state TEXT NOT NULL DEFAULT 'new',
+        prerequisite_for TEXT,
         times_asked INTEGER NOT NULL DEFAULT 0,
         times_blocked INTEGER NOT NULL DEFAULT 0,
         times_recovered INTEGER NOT NULL DEFAULT 0,
@@ -352,6 +353,7 @@ export class SqliteStore {
       INSERT INTO topic_memory (
         topic_id,
         learning_state,
+        prerequisite_for,
         times_asked,
         times_blocked,
         times_recovered,
@@ -368,6 +370,7 @@ export class SqliteStore {
       ) VALUES (
         ${toSqlString(topicId)},
         ${toSqlString(normalized.learningState)},
+        ${toSqlString(normalized.prerequisiteFor)},
         ${normalized.timesAsked},
         ${normalized.timesBlocked},
         ${normalized.timesRecovered},
@@ -384,6 +387,7 @@ export class SqliteStore {
       )
       ON CONFLICT(topic_id) DO UPDATE SET
         learning_state = excluded.learning_state,
+        prerequisite_for = excluded.prerequisite_for,
         times_asked = excluded.times_asked,
         times_blocked = excluded.times_blocked,
         times_recovered = excluded.times_recovered,
@@ -398,6 +402,35 @@ export class SqliteStore {
         next_review_at = excluded.next_review_at,
         mastered_streak = excluded.mastered_streak;
     `);
+  }
+
+  async savePrerequisite(topicId, prerequisiteForTopicId) {
+    await this.#execute(`
+      INSERT INTO topic_memory (
+        topic_id,
+        prerequisite_for
+      ) VALUES (
+        ${toSqlString(topicId)},
+        ${toSqlString(prerequisiteForTopicId)}
+      )
+      ON CONFLICT(topic_id) DO UPDATE SET
+        prerequisite_for = excluded.prerequisite_for;
+    `);
+  }
+
+  async listPendingPrerequisites() {
+    const rows = await this.#query(`
+      SELECT topic_id, prerequisite_for, learning_state
+      FROM topic_memory
+      WHERE prerequisite_for IS NOT NULL
+        AND learning_state NOT IN ('mastered_clean', 'mastered_recovered');
+    `);
+
+    return rows.map((row) => ({
+      topicId: row.topic_id,
+      prerequisiteFor: row.prerequisite_for,
+      learningState: row.learning_state,
+    }));
   }
 
   async saveAttempt(attempt) {
@@ -529,6 +562,7 @@ export class SqliteStore {
   async #ensureTopicMemoryColumns() {
     const columns = await this.#query("PRAGMA table_info(topic_memory);");
     await this.#ensureColumn("topic_memory", columns, "learning_state", "TEXT NOT NULL DEFAULT 'new'");
+    await this.#ensureColumn("topic_memory", columns, "prerequisite_for", "TEXT");
     await this.#ensureColumn("topic_memory", columns, "times_asked", "INTEGER NOT NULL DEFAULT 0");
     await this.#ensureColumn("topic_memory", columns, "times_blocked", "INTEGER NOT NULL DEFAULT 0");
     await this.#ensureColumn("topic_memory", columns, "times_recovered", "INTEGER NOT NULL DEFAULT 0");
@@ -584,6 +618,7 @@ export class SqliteStore {
       CREATE TABLE topic_memory (
         topic_id TEXT PRIMARY KEY,
         learning_state TEXT NOT NULL DEFAULT 'new',
+        prerequisite_for TEXT,
         times_asked INTEGER NOT NULL DEFAULT 0,
         times_blocked INTEGER NOT NULL DEFAULT 0,
         times_recovered INTEGER NOT NULL DEFAULT 0,
@@ -734,6 +769,7 @@ function fromStoredTopicId(topicId) {
 function mapMemoryRow(row) {
   return {
     learningState: row.learning_state ?? "new",
+    prerequisiteFor: row.prerequisite_for ?? null,
     timesAsked: Number(row.times_asked ?? 0),
     timesBlocked: Number(row.times_blocked ?? 0),
     timesRecovered: Number(row.times_recovered ?? 0),
@@ -768,6 +804,7 @@ function normalizeMemoryForPersistence(memory = {}) {
 
   return {
     learningState: memory.learningState ?? "new",
+    prerequisiteFor: memory.prerequisiteFor ?? null,
     timesAsked,
     timesBlocked: Number(memory.timesBlocked ?? 0),
     timesRecovered: Number(memory.timesRecovered ?? 0),

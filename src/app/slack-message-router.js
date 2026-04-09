@@ -2,6 +2,7 @@ import { normalizeControlCommand } from "./control-command.js";
 import { looksLikeCounterQuestion } from "./counter-question.js";
 import { getDirectQaShortcutReply } from "./direct-qa-shortcut.js";
 import { createThreadState } from "../domain/thread-policy.js";
+import { classifyFreshness } from "../domain/freshness-classifier.js";
 import { previewText } from "../debug/debug-logger.js";
 
 const ROOT_REPLY_REDIRECT_TEXT =
@@ -132,12 +133,14 @@ export class SlackMessageRouter {
     try {
       const threadTs = event.ts;
       const openedAt = this.now();
+      const { type: freshnessType } = classifyFreshness(event.text);
       await this.#startDirectQaThread({
         threadTs,
         text: event.text,
         openedAt,
         replyFactory: async () => this.llmRunner.runTask("direct_question", {
           text: event.text,
+          freshnessType,
         }),
       });
     } catch (error) {

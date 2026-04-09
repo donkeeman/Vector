@@ -8,6 +8,7 @@ const DEFAULT_LANE_WEIGHTS = {
 export function createEmptyTopicMemory() {
   return {
     learningState: "new",
+    prerequisiteFor: null,
     timesAsked: 0,
     timesBlocked: 0,
     timesRecovered: 0,
@@ -26,6 +27,10 @@ export function createEmptyTopicMemory() {
 
 export function scheduleReview(memory, outcome, now, options = {}) {
   const current = normalizeTopicMemory(memory);
+
+  if (outcome === "deferred") {
+    return now;
+  }
 
   if (outcome === "blocked") {
     return addKstDays(now, 1);
@@ -116,6 +121,10 @@ export function classifyReviewPriority(memory, now) {
   }
 
   if (current.nextReviewAt && current.nextReviewAt.getTime() > now.getTime()) {
+    return null;
+  }
+
+  if (current.learningState === "deferred") {
     return null;
   }
 
@@ -216,6 +225,10 @@ function recoveredMasteryDaysForStreak(streak) {
 }
 
 function resolveLearningState(current, outcome, options) {
+  if (outcome === "deferred") {
+    return "deferred";
+  }
+
   if (outcome === "blocked") {
     return "blocked";
   }
@@ -254,6 +267,7 @@ function normalizeTopicMemory(memory) {
 
   return {
     learningState,
+    prerequisiteFor: memory.prerequisiteFor ?? null,
     timesAsked,
     timesBlocked,
     timesRecovered,

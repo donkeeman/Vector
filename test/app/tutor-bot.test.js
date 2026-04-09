@@ -2366,6 +2366,165 @@ test("study 스택은 blocked에서 push되고 하위 질문 mastered 시 pop되
   ]);
 });
 
+test("blocked인데 study 스택이 sealed면 스레드를 deferred로 종료하고 다음 질문을 예약한다", async () => {
+  const store = createInMemoryStore();
+  const now = new Date("2026-03-10T09:05:00+09:00");
+  store.threads.set(
+    "111.448",
+    createThreadState({
+      slackThreadTs: "111.448",
+      topicId: "distributed-lock",
+      openedAt: new Date("2026-03-10T09:00:00+09:00"),
+      lastAssistantPrompt: "분산 락의 split-brain 시나리오를 설명해봐.",
+      lastChallengePrompt: "분산 락의 split-brain 시나리오를 설명해봐.",
+      directQaStack: {
+        frames: [
+          { id: "f1", prompt: "분산 락의 split-brain 시나리오를 설명해봐.", weakPassUsed: false, createdAt: "2026-03-10T00:00:00.000Z" },
+          { id: "f2", prompt: "split-brain이 뭐야?", weakPassUsed: false, createdAt: "2026-03-10T00:01:00.000Z" },
+          { id: "f3", prompt: "quorum이 뭐야?", weakPassUsed: false, createdAt: "2026-03-10T00:02:00.000Z" },
+          { id: "f4", prompt: "fencing token이 왜 필요해?", weakPassUsed: false, createdAt: "2026-03-10T00:03:00.000Z" },
+          { id: "f5", prompt: "stale writer가 뭔지 말해봐.", weakPassUsed: false, createdAt: "2026-03-10T00:04:00.000Z" },
+        ],
+        sealed: true,
+        maxDepth: 5,
+      },
+      directQaStackSealed: true,
+      studyQuestionRound: 5,
+      studyQuestionRoundLimit: 5,
+    }),
+  );
+
+  const replies = [];
+  const bot = new TutorBot({
+    store,
+    topics: [],
+    llmRunner: {
+      async runTask(type) {
+        if (type === "evaluate") {
+          return {
+            outcome: "blocked",
+            rationale: "핵심 개념을 설명하지 못함",
+          };
+        }
+
+        if (type === "classify_study_turn") {
+          return {
+            intent: "answer_attempt",
+            confidence: 0.9,
+            rationale: "사용자가 현재 질문에 대한 답변 시도",
+          };
+        }
+
+        if (type === "teach") {
+          throw new Error("teach should not be called when deferred");
+        }
+
+        throw new Error(`unexpected task: ${type}`);
+      },
+    },
+    slackClient: {
+      async postDirectMessage() {
+        throw new Error("should not be called");
+      },
+      async postThreadReply(threadTs, text) {
+        replies.push({ threadTs, text });
+        return { ok: true };
+      },
+    },
+  });
+
+  const result = await bot.handleThreadMessage({
+    threadTs: "111.448",
+    text: "모르겠어",
+    now,
+  });
+
+  assert.equal(result.thread.status, "deferred");
+  assert.equal(result.shouldScheduleNextQuestion, true);
+  assert.equal(result.thread.closedAt?.toISOString(), now.toISOString());
+  assert.equal(store.memories.get("distributed-lock")?.learningState, "deferred");
+  assert.equal(store.prerequisites.length, 1);
+  assert.equal(store.prerequisites[0]?.prerequisiteFor, "distributed-lock");
+  assert.match(store.prerequisites[0]?.topicId ?? "", /^distributed-lock-prereq-/u);
+  assert.deepEqual(replies, [
+    {
+      threadTs: "111.448",
+      text: "지금 이 질문은 네 현재 단계에선 무리야. 선행 개념부터 다시 밟고 오면 이어서 붙자.",
+    },
+  ]);
+});
+
+test("blocked teach payload에는 freshnessType이 함께 전달된다", async () => {
+  const store = createInMemoryStore();
+  store.threads.set(
+    "111.449",
+    createThreadState({
+      slackThreadTs: "111.449",
+      topicId: "react-hooks",
+      openedAt: new Date("2026-03-10T09:00:00+09:00"),
+      lastAssistantPrompt: "React 19 변경점을 설명해봐.",
+      lastChallengePrompt: "React 19 변경점을 설명해봐.",
+      directQaStack: {
+        frames: [
+          {
+            id: "root",
+            prompt: "React 19 변경점을 설명해봐.",
+            weakPassUsed: false,
+            createdAt: "2026-03-10T00:00:00.000Z",
+          },
+        ],
+        sealed: false,
+        maxDepth: 5,
+      },
+      directQaStackSealed: false,
+      studyQuestionRound: 1,
+      studyQuestionRoundLimit: 5,
+    }),
+  );
+
+  let teachPayload = null;
+  const bot = new TutorBot({
+    store,
+    topics: [],
+    llmRunner: {
+      async runTask(type, payload) {
+        if (type === "evaluate") {
+          return {
+            outcome: "blocked",
+            rationale: "최신 변경점을 모름",
+          };
+        }
+
+        if (type === "teach") {
+          teachPayload = payload;
+          return {
+            text: "핵심 개념부터 다시 잡자.",
+            challengePrompt: "hook이 뭐야?",
+          };
+        }
+
+        throw new Error(`unexpected task: ${type}`);
+      },
+    },
+    slackClient: {
+      async postDirectMessage() {
+        throw new Error("should not be called");
+      },
+      async postThreadReply() {
+        return { ok: true };
+      },
+    },
+  });
+
+  await bot.handleThreadMessage({
+    threadTs: "111.449",
+    text: "잘 모르겠어",
+    now: new Date("2026-03-10T09:07:00+09:00"),
+  });
+
+  assert.equal(teachPayload?.freshnessType, "volatile");
+});
+
 test("평가 결과가 mastered면 clean mastery 상태 답글 후 스레드를 닫고 다음 질문 예약 신호를 반환한다", async () => {
   const store = createInMemoryStore();
   store.threads.set(
@@ -2581,6 +2740,7 @@ function createInMemoryStore() {
     threads: new Map(),
     memories: new Map(),
     topics: new Map(),
+    prerequisites: [],
     attempts: [],
     teachingMemories: [],
     async getSession() {
@@ -2658,6 +2818,25 @@ function createInMemoryStore() {
     },
     async saveTopicMemory(topicId, memory) {
       this.memories.set(topicId, memory);
+    },
+    async savePrerequisite(topicId, prerequisiteForTopicId) {
+      this.prerequisites.push({
+        topicId,
+        prerequisiteFor: prerequisiteForTopicId,
+      });
+
+      const existing = this.memories.get(topicId) ?? {};
+      this.memories.set(topicId, {
+        ...existing,
+        prerequisiteFor: prerequisiteForTopicId,
+      });
+    },
+    async listPendingPrerequisites() {
+      return this.prerequisites.filter((entry) => {
+        const memory = this.memories.get(entry.topicId);
+        const learningState = memory?.learningState ?? "new";
+        return learningState !== "mastered_clean" && learningState !== "mastered_recovered";
+      });
     },
     async saveAttempt(attempt) {
       this.attempts.push(attempt);

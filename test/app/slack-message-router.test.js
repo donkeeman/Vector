@@ -259,6 +259,7 @@ test("DM 루트 일반 질문은 원문 메시지 스레드에 답한다", async
       type: "direct_question",
       payload: {
         text: "event loop 설명해줘",
+        freshnessType: "unknown",
       },
     },
   ]);
@@ -292,6 +293,47 @@ test("DM 루트 일반 질문은 원문 메시지 스레드에 답한다", async
       textPreview: "event loop 설명해줘",
     },
   });
+});
+
+test("volatile 질문의 direct_question payload에는 freshnessType이 포함된다", async () => {
+  const slackClient = createSlackClient();
+  const llmCalls = [];
+  const router = new SlackMessageRouter({
+    store: createStore(),
+    tutorBot: createTutorBot(),
+    llmRunner: {
+      async runTask(type, payload) {
+        llmCalls.push({ type, payload });
+        return { text: "React 19 얘긴 결국 공식 문서가 기준이지." };
+      },
+    },
+    slackClient,
+  });
+
+  await router.handleMessageEvent({
+    type: "message",
+    channel_type: "im",
+    channel: "D123",
+    user: "U123",
+    text: "React 19에서 새로 추가된 use() 훅이 뭐야?",
+    ts: "1000.205",
+  });
+
+  assert.deepEqual(llmCalls, [
+    {
+      type: "direct_question",
+      payload: {
+        text: "React 19에서 새로 추가된 use() 훅이 뭐야?",
+        freshnessType: "volatile",
+      },
+    },
+  ]);
+  assert.deepEqual(slackClient.replies, [
+    {
+      threadTs: "1000.205",
+      text: "React 19 얘긴 결국 공식 문서가 기준이지.",
+    },
+  ]);
 });
 
 test("루트 DM의 자기소개와 사용법 질문은 키워드 기반 고정문구로 답하고 LLM을 호출하지 않는다", async () => {
@@ -438,6 +480,7 @@ test("루트 DM의 비기술 질문도 로컬 차단 없이 direct_question으�
       type: "direct_question",
       payload: {
         text: "오늘 점심 뭐 먹지",
+        freshnessType: "unknown",
       },
     },
   ]);
@@ -478,6 +521,7 @@ test("키워드 allowlist에 없던 개발 질문도 direct_question으로 통�
       type: "direct_question",
       payload: {
         text: "ETag와 Last-Modified가 뭐야?",
+        freshnessType: "unknown",
       },
     },
   ]);
@@ -604,6 +648,7 @@ test("열린 스레드가 있어도 인접 기술 질문은 새 direct question�
       type: "direct_question",
       payload: {
         text: "행렬식이 뭐야",
+        freshnessType: "unknown",
       },
     },
   ]);

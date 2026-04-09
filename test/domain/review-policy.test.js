@@ -54,6 +54,9 @@ test("outcome 전이에 따라 learningState가 계산된다", () => {
 
   const fuzzy = updateTopicMemory(empty, "continue", now);
   assert.equal(fuzzy.learningState, "fuzzy");
+
+  const deferred = updateTopicMemory(empty, "deferred", now);
+  assert.equal(deferred.learningState, "deferred");
 });
 
 test("new > review lane 분류와 review 우선순위(blocked > fuzzy > mastered_recovered > mastered_clean)가 고정된다", () => {
@@ -91,6 +94,15 @@ test("new > review lane 분류와 review 우선순위(blocked > fuzzy > mastered
   assert.equal(classifyReviewPriority(fuzzyMemory, now), 3);
   assert.equal(classifyReviewPriority(recoveredMemory, now), 2);
   assert.equal(classifyReviewPriority(cleanMemory, now), 1);
+  assert.equal(
+    classifyReviewPriority({
+      ...createEmptyTopicMemory(),
+      timesAsked: 1,
+      learningState: "deferred",
+      nextReviewAt: now,
+    }, now),
+    null,
+  );
 });
 
 test("lane selector는 new/review가 모두 가능하면 기본 비율을 new 60, review 40으로 고른다", () => {

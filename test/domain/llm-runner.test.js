@@ -170,6 +170,17 @@ test("study 지시는 retrieval context와 반복 패턴 해석 규칙을 포함
   assert.match(source, /teach[\s\S]*same misconception repeated/u);
 });
 
+test("freshness 보수 응답 규칙은 direct_question, teach, direct_thread_turn에 들어간다", () => {
+  const source = readFileSync(new URL("../../src/llm/codex-cli-runner.js", import.meta.url), "utf8");
+
+  assert.match(source, /direct_question[\s\S]*freshnessType[\s\S]*volatile/u);
+  assert.match(source, /direct_question[\s\S]*최신 공식 문서 확인 필요/u);
+  assert.match(source, /teach[\s\S]*freshnessType[\s\S]*volatile/u);
+  assert.match(source, /teach[\s\S]*최신 공식 문서에서 확인해/u);
+  assert.match(source, /direct_thread_turn[\s\S]*freshnessType[\s\S]*volatile/u);
+  assert.match(source, /direct_thread_turn[\s\S]*최신 공식 문서 확인 필요/u);
+});
+
 test("질문과 direct Q&A 지시는 도발적 라이벌 톤을 직접 요구한다", () => {
   const source = readFileSync(new URL("../../src/llm/codex-cli-runner.js", import.meta.url), "utf8");
 

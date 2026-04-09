@@ -7,6 +7,11 @@ import {
   selectStudyLane,
 } from "../domain/topic-memory.js";
 import {
+  applyPrerequisitePriority,
+  filterPrerequisiteTopics,
+  isPrerequisiteSatisfied,
+} from "../domain/prerequisite-policy.js";
+import {
   applyDirectQaOperation,
   createDirectQaStackState,
 } from "../domain/direct-qa-stack-policy.js";
@@ -91,10 +96,14 @@ export function createTutorQuestionDispatcher({
 
     const memories = await store.getTopicMemories();
     const catalogTopics = await listCatalogTopics(now);
+    const pendingPrerequisites = typeof store.listPendingPrerequisites === "function"
+      ? await store.listPendingPrerequisites()
+      : [];
     let topic = topicSelector({
       now,
       topics: catalogTopics,
       memories,
+      pendingPrerequisites,
       random,
       lastTopicId: lastDispatchedTopicId,
       state: topicSelectionState,
@@ -289,6 +298,7 @@ export function pickTopicForContinuousFlow({
   now,
   topics,
   memories,
+  pendingPrerequisites = [],
   random = Math.random,
   lastTopicId = null,
   state = null,
@@ -298,12 +308,39 @@ export function pickTopicForContinuousFlow({
   }
 
   const memoryMap = memories instanceof Map ? memories : new Map();
-  const newTopicCandidates = topics.filter((topic) => {
-    const memory = memoryMap.get(topic.id) ?? null;
+  const pendingDeferredTopicIds = new Set(
+    Array.isArray(pendingPrerequisites)
+      ? pendingPrerequisites
+        .map((entry) => String(entry?.prerequisiteFor ?? entry?.prerequisite_for ?? "").trim())
+        .filter(Boolean)
+      : [],
+  );
+  const prioritizedTopics = applyPrerequisitePriority(topics, memoryMap);
+  const prerequisiteTopicIds = new Set(
+    filterPrerequisiteTopics(prioritizedTopics, memoryMap).map((topic) => topic.id),
+  );
+  const candidateTopics = prerequisiteTopicIds.size > 0
+    ? prioritizedTopics.filter((topic) => prerequisiteTopicIds.has(topic.id))
+    : prioritizedTopics.filter((topic) => !pendingDeferredTopicIds.has(topic.id));
+  const effectiveMemoryMap = new Map(
+    candidateTopics.map((topic) => {
+      const memory = memoryMap.get(topic.id) ?? null;
+      if (
+        memory?.learningState === "deferred"
+        && isPrerequisiteSatisfied(topic.id, memoryMap)
+      ) {
+        return [topic.id, { ...memory, learningState: "fuzzy" }];
+      }
+
+      return [topic.id, memory];
+    }),
+  );
+  const newTopicCandidates = candidateTopics.filter((topic) => {
+    const memory = effectiveMemoryMap.get(topic.id) ?? null;
     return classifyTopicLane(memory) === "new";
   });
-  const reviewCandidates = topics.filter((topic) => {
-    const memory = memoryMap.get(topic.id) ?? null;
+  const reviewCandidates = candidateTopics.filter((topic) => {
+    const memory = effectiveMemoryMap.get(topic.id) ?? null;
     return classifyReviewPriority(memory, now) !== null;
   });
   const lane = selectStudyLane({
@@ -320,7 +357,7 @@ export function pickTopicForContinuousFlow({
     const reviewTopic = pickReviewTopic({
       now,
       topics: reviewCandidates,
-      memories: memoryMap,
+      memories: effectiveMemoryMap,
     });
 
     if (
@@ -354,7 +391,7 @@ export function pickTopicForContinuousFlow({
   return pickReviewTopic({
     now,
     topics: reviewCandidates,
-    memories: memoryMap,
+    memories: effectiveMemoryMap,
   });
 }
 

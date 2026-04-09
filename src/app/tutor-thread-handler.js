@@ -15,6 +15,7 @@ import {
   createEmptyTopicMemory,
   updateTopicMemory,
 } from "../domain/topic-memory.js";
+import { classifyFreshness } from "../domain/freshness-classifier.js";
 
 const NOOP_LOGGER = {
   debug() {},
@@ -26,6 +27,8 @@ const STUDY_TURN_INTENT = {
   SIDE_COUNTERQUESTION: "side_counterquestion",
 };
 const SIDE_COUNTERQUESTION_CONFIDENCE_THRESHOLD = 0.7;
+const DEFERRED_REPLY_TEXT =
+  "지금 이 질문은 네 현재 단계에선 무리야. 선행 개념부터 다시 밟고 오면 이어서 붙자.";
 
 export function createTutorThreadHandler({
   store,
@@ -230,6 +233,52 @@ export function createTutorThreadHandler({
     }
 
     if (normalizedEvaluation.outcome === "blocked") {
+      const currentStack = normalizeDirectQaStackState(
+        sessionBoundThread.directQaStack ?? createDirectQaStackState(),
+      );
+      const shouldDeferThread =
+        currentStack.sealed && currentStack.frames.length >= currentStack.maxDepth;
+
+      if (shouldDeferThread) {
+        await enqueuePrerequisiteTopic({
+          store,
+          deferredTopicId: repliedThread.topicId,
+          now,
+          stack: currentStack,
+          fallbackPrompt: getChallengePrompt(sessionBoundThread),
+        });
+
+        const deferredMemory = updateTopicMemory(
+          currentMemory,
+          "deferred",
+          now,
+          {
+            lastMisconceptionSummary: normalizedEvaluation.misconceptionSummary ?? null,
+          },
+        );
+        await store.saveTopicMemory(repliedThread.topicId, deferredMemory);
+
+        const deferredThread = closeThread(
+          setThreadPrompts(sessionBoundThread, {
+            assistantPrompt: DEFERRED_REPLY_TEXT,
+            challengePrompt: getChallengePrompt(sessionBoundThread),
+          }),
+          "deferred",
+          now,
+        );
+        await slackClient.postThreadReply(
+          threadTs,
+          decorateStudyMessage(DEFERRED_REPLY_TEXT, deferredThread),
+        );
+        await store.saveThread(deferredThread);
+
+        return {
+          thread: deferredThread,
+          memory: deferredMemory,
+          shouldScheduleNextQuestion: true,
+        };
+      }
+
       const blockedBaseMemory = updateTopicMemory(
         currentMemory,
         "blocked",
@@ -240,10 +289,13 @@ export function createTutorThreadHandler({
       );
       await store.saveTopicMemory(repliedThread.topicId, blockedBaseMemory);
 
+      const freshnessSource = getChallengePrompt(sessionBoundThread) ?? text;
+      const { type: freshnessType } = classifyFreshness(freshnessSource);
       const teaching = await llmRunner.runTask("teach", {
         thread: sessionBoundThread,
         text,
         evaluation: normalizedEvaluation,
+        freshnessType,
         lastAssistantPrompt: sessionBoundThread.lastAssistantPrompt ?? null,
         lastChallengePrompt: getChallengePrompt(sessionBoundThread),
         codexSessionId: sessionBoundThread.codexSessionId ?? null,
@@ -670,4 +722,76 @@ async function loadRetrievalContext({ store, topicId, topicMemory }) {
     previousMisconceptionSummary,
     previousTeachingSummary,
   };
+}
+
+async function enqueuePrerequisiteTopic({
+  store,
+  deferredTopicId,
+  now,
+  stack,
+  fallbackPrompt,
+}) {
+  if (!deferredTopicId || typeof store.savePrerequisite !== "function") {
+    return;
+  }
+
+  const prompt = normalizeChallengePrompt(
+    getDirectQaTopPrompt(stack),
+    fallbackPrompt,
+  );
+  if (!prompt) {
+    return;
+  }
+
+  const existingPrerequisiteId = await findExistingPrerequisiteTopicId({
+    store,
+    deferredTopicId,
+  });
+  const topicId = existingPrerequisiteId ?? buildPrerequisiteTopicId(deferredTopicId, now);
+
+  if (!existingPrerequisiteId && typeof store.saveTopic === "function") {
+    const baseTopic = await findTopicById(store, deferredTopicId);
+    await store.saveTopic(
+      {
+        id: topicId,
+        title: `${baseTopic?.title ?? "Prerequisite"} (prerequisite)`,
+        category: baseTopic?.category ?? "general",
+        promptSeed: prompt,
+        weight: Number(baseTopic?.weight ?? 3),
+      },
+      now,
+    );
+  }
+
+  await store.savePrerequisite(topicId, deferredTopicId);
+}
+
+async function findExistingPrerequisiteTopicId({ store, deferredTopicId }) {
+  if (typeof store.listPendingPrerequisites !== "function") {
+    return null;
+  }
+
+  const pending = await store.listPendingPrerequisites();
+  const matched = Array.isArray(pending)
+    ? pending.find((entry) => entry?.prerequisiteFor === deferredTopicId)
+    : null;
+
+  return matched?.topicId ?? null;
+}
+
+async function findTopicById(store, topicId) {
+  if (typeof store.listTopics !== "function") {
+    return null;
+  }
+
+  const topics = await store.listTopics();
+  if (!Array.isArray(topics)) {
+    return null;
+  }
+
+  return topics.find((topic) => topic?.id === topicId) ?? null;
+}
+
+function buildPrerequisiteTopicId(deferredTopicId, now) {
+  return `${deferredTopicId}-prereq-${now.getTime()}`;
 }
