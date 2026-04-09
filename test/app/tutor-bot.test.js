@@ -1933,6 +1933,8 @@ test("evaluate/followup/teach payload는 retrieval context를 함께 넘긴다",
   assert.equal(followupPayload.latestTeachingMemory?.threadTs, "teach.22");
   assert.equal(teachPayload.recentAttempts.length, 2);
   assert.equal(teachPayload.latestTeachingMemory?.threadTs, "teach.22");
+  assert.equal(Array.isArray(teachPayload.retrievedChunks), true);
+  assert.equal(teachPayload.retrievedChunks.length > 0, true);
   assert.equal(
     teachPayload.previousMisconceptionSummary,
     "microtask와 render 순서를 헷갈림",

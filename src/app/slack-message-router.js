@@ -3,6 +3,7 @@ import { looksLikeCounterQuestion } from "./counter-question.js";
 import { getDirectQaShortcutReply } from "./direct-qa-shortcut.js";
 import { createThreadState } from "../domain/thread-policy.js";
 import { classifyFreshness } from "../domain/freshness-classifier.js";
+import { searchRagLiteChunks } from "../domain/rag-lite-retriever.js";
 import { previewText } from "../debug/debug-logger.js";
 
 const ROOT_REPLY_REDIRECT_TEXT =
@@ -134,6 +135,11 @@ export class SlackMessageRouter {
       const threadTs = event.ts;
       const openedAt = this.now();
       const { type: freshnessType } = classifyFreshness(event.text);
+      const retrievedChunks = await searchRagLiteChunks({
+        query: event.text,
+        topK: 3,
+        store: this.store,
+      });
       await this.#startDirectQaThread({
         threadTs,
         text: event.text,
@@ -141,6 +147,7 @@ export class SlackMessageRouter {
         replyFactory: async () => this.llmRunner.runTask("direct_question", {
           text: event.text,
           freshnessType,
+          ...(retrievedChunks.length > 0 ? { retrievedChunks } : {}),
         }),
       });
     } catch (error) {
@@ -250,10 +257,19 @@ export class SlackMessageRouter {
     });
 
     try {
+      const { type: freshnessType } = classifyFreshness(event.text);
+      const retrievedChunks = await searchRagLiteChunks({
+        query: event.text,
+        topK: 3,
+        store: this.store,
+        history,
+      });
       const rawReply = await this.llmRunner.runTask("direct_thread_turn", {
         thread: activeThread,
         history,
         text: event.text,
+        freshnessType,
+        ...(retrievedChunks.length > 0 ? { retrievedChunks } : {}),
         ...(activeThread.codexSessionId ? { codexSessionId: activeThread.codexSessionId } : {}),
       });
       const reply = normalizeDirectQaReply(rawReply);

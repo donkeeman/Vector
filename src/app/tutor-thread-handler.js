@@ -16,6 +16,7 @@ import {
   updateTopicMemory,
 } from "../domain/topic-memory.js";
 import { classifyFreshness } from "../domain/freshness-classifier.js";
+import { searchRagLiteChunks } from "../domain/rag-lite-retriever.js";
 
 const NOOP_LOGGER = {
   debug() {},
@@ -291,11 +292,20 @@ export function createTutorThreadHandler({
 
       const freshnessSource = getChallengePrompt(sessionBoundThread) ?? text;
       const { type: freshnessType } = classifyFreshness(freshnessSource);
+      const retrievedChunks = await searchRagLiteChunks({
+        query: freshnessSource,
+        topK: 3,
+        store,
+        topicId: repliedThread.topicId,
+        recentAttempts: retrievalContext.recentAttempts,
+        latestTeachingMemory: retrievalContext.latestTeachingMemory,
+      });
       const teaching = await llmRunner.runTask("teach", {
         thread: sessionBoundThread,
         text,
         evaluation: normalizedEvaluation,
         freshnessType,
+        ...(retrievedChunks.length > 0 ? { retrievedChunks } : {}),
         lastAssistantPrompt: sessionBoundThread.lastAssistantPrompt ?? null,
         lastChallengePrompt: getChallengePrompt(sessionBoundThread),
         codexSessionId: sessionBoundThread.codexSessionId ?? null,

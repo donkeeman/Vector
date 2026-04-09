@@ -336,6 +336,53 @@ test("volatile 질문의 direct_question payload에는 freshnessType이 포함�
   ]);
 });
 
+test("direct_question payload는 retrieval 결과가 있으면 retrievedChunks를 포함한다", async () => {
+  const slackClient = createSlackClient();
+  const llmCalls = [];
+  const store = createStore();
+  store.topics = [
+    {
+      id: "event-loop",
+      title: "Event Loop",
+      category: "runtime",
+      promptSeed: "event loop microtask macrotask",
+    },
+  ];
+  store.listTopics = async function listTopics() {
+    return this.topics;
+  };
+
+  const router = new SlackMessageRouter({
+    store,
+    tutorBot: createTutorBot(),
+    llmRunner: {
+      async runTask(type, payload) {
+        llmCalls.push({ type, payload });
+        return { text: "event loop 핵심부터 보자." };
+      },
+    },
+    slackClient,
+  });
+
+  await router.handleMessageEvent({
+    type: "message",
+    channel_type: "im",
+    channel: "D123",
+    user: "U123",
+    text: "event loop 설명해줘",
+    ts: "1000.206",
+  });
+
+  assert.equal(llmCalls.length, 1);
+  assert.equal(llmCalls[0].type, "direct_question");
+  assert.equal(llmCalls[0].payload.text, "event loop 설명해줘");
+  assert.equal(llmCalls[0].payload.freshnessType, "unknown");
+  assert.equal(Array.isArray(llmCalls[0].payload.retrievedChunks), true);
+  assert.equal(llmCalls[0].payload.retrievedChunks.length > 0, true);
+  assert.equal(llmCalls[0].payload.retrievedChunks[0].source, "topic:event-loop");
+  assert.match(llmCalls[0].payload.retrievedChunks[0].text, /event loop/u);
+});
+
 test("루트 DM의 자기소개와 사용법 질문은 키워드 기반 고정문구로 답하고 LLM을 호출하지 않는다", async () => {
   const slackClient = createSlackClient();
   const llmCalls = [];
@@ -952,6 +999,67 @@ test("direct_qa 스레드 reply는 history를 싣고 direct_thread_turn으로 �
       },
     ],
   );
+});
+
+test("direct_thread_turn payload는 history 기반 retrieval 결과가 있으면 retrievedChunks를 포함한다", async () => {
+  const calls = [];
+  const slackClient = createSlackClient();
+  const store = createStore();
+  store.threads.set("1000.901", {
+    slackThreadTs: "1000.901",
+    topicId: null,
+    kind: "direct_qa",
+    mode: "direct_qa",
+    status: "open",
+    openedAt: new Date("2026-03-10T17:01:00+09:00"),
+    closedAt: null,
+    lastCounterQuestionAt: null,
+    lastCounterQuestionResolvedAt: null,
+  });
+  store.directQaMessages.set("1000.901", [
+    {
+      threadTs: "1000.901",
+      role: "user",
+      text: "vector search가 뭐야",
+      recordedAt: new Date("2026-03-10T17:01:00+09:00"),
+    },
+    {
+      threadTs: "1000.901",
+      role: "assistant",
+      text: "vector search는 임베딩 거리 기반 검색이야.",
+      recordedAt: new Date("2026-03-10T17:01:02+09:00"),
+    },
+  ]);
+
+  const router = new SlackMessageRouter({
+    store,
+    tutorBot: createTutorBot(),
+    llmRunner: {
+      async runTask(type, payload) {
+        calls.push({ type, payload });
+        return { text: "RAG는 그 검색 결과를 생성 단계에 연결해." };
+      },
+    },
+    slackClient,
+    now: () => new Date("2026-03-10T17:02:00+09:00"),
+  });
+
+  await router.handleMessageEvent({
+    type: "message",
+    channel_type: "im",
+    channel: "D123",
+    user: "U123",
+    text: "그럼 vector search랑 RAG 차이는?",
+    ts: "1001.01",
+    thread_ts: "1000.901",
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].type, "direct_thread_turn");
+  assert.equal(calls[0].payload.freshnessType, "evergreen");
+  assert.equal(Array.isArray(calls[0].payload.retrievedChunks), true);
+  assert.equal(calls[0].payload.retrievedChunks.length > 0, true);
+  assert.match(calls[0].payload.retrievedChunks[0].source, /^history:/u);
 });
 
 test("awaiting_answer 상태의 direct_qa reply도 direct_thread_turn으로 라우팅한다", async () => {

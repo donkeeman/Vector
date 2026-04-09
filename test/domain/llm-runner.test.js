@@ -181,6 +181,17 @@ test("freshness 보수 응답 규칙은 direct_question, teach, direct_thread_tu
   assert.match(source, /direct_thread_turn[\s\S]*최신 공식 문서 확인 필요/u);
 });
 
+test("RAG-lite 지시는 retrievedChunks가 있으면 grounding과 source citation을 요구한다", () => {
+  const source = readFileSync(new URL("../../src/llm/codex-cli-runner.js", import.meta.url), "utf8");
+
+  assert.match(source, /direct_question[\s\S]*retrievedChunks[\s\S]*ground/u);
+  assert.match(source, /direct_question[\s\S]*source labels/u);
+  assert.match(source, /teach[\s\S]*retrievedChunks[\s\S]*ground/u);
+  assert.match(source, /teach[\s\S]*source labels/u);
+  assert.match(source, /direct_thread_turn[\s\S]*retrievedChunks[\s\S]*ground/u);
+  assert.match(source, /direct_thread_turn[\s\S]*source labels/u);
+});
+
 test("질문과 direct Q&A 지시는 도발적 라이벌 톤을 직접 요구한다", () => {
   const source = readFileSync(new URL("../../src/llm/codex-cli-runner.js", import.meta.url), "utf8");
 
