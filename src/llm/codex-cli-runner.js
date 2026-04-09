@@ -14,10 +14,17 @@ const NOOP_LOGGER = {
 };
 
 export class CodexCliRunner {
-  constructor({ command = "codex", workdir = process.cwd(), model = null, logger = NOOP_LOGGER } = {}) {
+  constructor({
+    command = "codex",
+    workdir = process.cwd(),
+    model = null,
+    env = {},
+    logger = NOOP_LOGGER,
+  } = {}) {
     this.command = command;
     this.workdir = workdir;
     this.model = model;
+    this.env = normalizeEnvMap(env);
     this.logger = logger;
   }
 
@@ -52,6 +59,10 @@ export class CodexCliRunner {
 
       const { stdout = "" } = await execFileAsync(this.command, args, {
         cwd: this.workdir,
+        env: {
+          ...process.env,
+          ...this.env,
+        },
         maxBuffer: 1024 * 1024 * 4,
       });
 
@@ -75,6 +86,17 @@ export class CodexCliRunner {
       await rm(tmpPath, { recursive: true, force: true });
     }
   }
+}
+
+function normalizeEnvMap(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([key, envValue]) => [String(key), String(envValue)]),
+  );
 }
 
 function buildTaskPrompt(taskType, payload) {
@@ -184,13 +206,15 @@ const TASK_INSTRUCTIONS = {
   topic:
     'Return {"topic":{"id":"kebab-case-id","title":"...","category":"...","promptSeed":"...","weight":1-10}} for a new CS/dev learning topic. Avoid duplicates with existingTopics/recentTopics. Pick broad computer-science or adjacent engineering topics (os, network, database, language runtime, distributed systems, security, tooling, testing, architecture). Do not output a question in this task; only topic metadata.',
   question:
-    'Return {"text":"..."} with exactly one concise CS question sentence only. Output only the technical question line: no preface statement, no rivalry-taunt statement, and no extra commentary before the question. Never combine two asks in one turn (no multi-part asks joined by "and" equivalents). If payload.topicMemory is null or topicMemory.attemptCount is 0, ask a foundational concept-definition question first (for example "X가 뭐야?" level) before mechanism-heavy depth. Use payload.recentAttempts and payload.latestTeachingMemory to target the current weak point. If payload.recentAttempts indicate repeat failure or same misconception repeated, ask one focused re-check question on that exact misconception instead of pivoting broad. Keep the question wording provocative, playful, and competitive without adding extra sentences.',
+    'Return {"text":"..."} with exactly one concise CS question sentence only. Output only the technical question line: no preface statement, no rivalry-taunt statement, and no extra commentary before the question. Never combine two asks in one turn (no multi-part asks joined by "and" equivalents). If payload.topicMemory is null or topicMemory.attemptCount is 0, ask a foundational concept-definition question first (for example "X가 뭐야?" level) before mechanism-heavy depth. Use payload.recentAttempts and payload.latestTeachingMemory to target the current weak point. If payload.recentAttempts indicate repeat failure or same misconception repeated, ask one focused re-check question on that exact misconception instead of pivoting broad. Keep the question wording provocative, playful, and competitive without adding extra sentences. Always reply in Korean informal speech (banmal), never honorific style. Treat the user as a close rival peer, so do not use honorific markers such as -시- forms (for example "해보시겠어", "해주시겠어").',
   evaluate:
-    'Return {"outcome":"continue|blocked|mastered","rationale":"...","text":"optional closing reply when mastered"} based on the answer quality. Evaluate the user answer against thread.lastChallengePrompt first (fallback: thread.lastAssistantPrompt). Use payload.topicMemory, payload.recentAttempts, payload.latestTeachingMemory, payload.previousMisconceptionSummary, and payload.previousTeachingSummary to judge repeat failure, recovered mastery, and same misconception repeated patterns. If the latest user message explicitly says they do not know (for example "잘 모르겠어", "모르겠어", "몰라"), set outcome to blocked. If the latest user message contains ambiguous references such as "that/it/why that", resolve them to thread.lastChallengePrompt by default when available.',
+    'Return {"outcome":"continue|blocked|mastered","rationale":"...","text":"optional closing reply when mastered"} based on the answer quality. Evaluate the user answer against thread.lastChallengePrompt first (fallback: thread.lastAssistantPrompt). Use payload.topicMemory, payload.recentAttempts, payload.latestTeachingMemory, payload.previousMisconceptionSummary, and payload.previousTeachingSummary to judge repeat failure, recovered mastery, and same misconception repeated patterns. If the latest user message explicitly says they do not know (for example "잘 모르겠어", "모르겠어", "몰라"), set outcome to blocked. If the latest user message contains ambiguous references such as "that/it/why that", resolve them to thread.lastChallengePrompt by default when available. When writing text, always use Korean informal speech (banmal), never honorific style, and avoid -시- forms.',
+  classify_study_turn:
+    'Return {"intent":"answer_attempt|clarification_request|side_counterquestion","confidence":0-1,"rationale":"..."} for the latest study-thread user turn. Use thread.lastChallengePrompt first (fallback: thread.lastAssistantPrompt) as the anchor. Classify as answer_attempt when the user is trying to answer the current challenge, including short/partial/wrong attempts and explicit not-knowing phrases (for example "몰라", "모르겠어"). Classify as clarification_request when the user asks to explain/rephrase the same challenge. Classify as side_counterquestion only when the user pivots to a separate side question that is not directly required to answer the current challenge. Prefer clarification_request over side_counterquestion when ambiguous.',
   followup:
-    'Return {"text":"..."} with exactly one sharper follow-up question sentence only. Output only the technical follow-up question line: no preface statement, no rivalry-taunt statement, and no extra commentary before the question. Keep the follow-up anchored to the same sub-concept as thread.lastChallengePrompt and evaluation.rationale; do not jump to a different topic. Use payload.recentAttempts and payload.previousMisconceptionSummary to keep pressure on repeat failure and same misconception repeated patterns. Never stack two follow-up asks in one message. Keep the question wording provocative and irritated without adding extra sentences.',
+    'Return {"text":"..."} with exactly one sharper follow-up question sentence only. Output only the technical follow-up question line: no preface statement, no rivalry-taunt statement, and no extra commentary before the question. Keep the follow-up anchored to the same sub-concept as thread.lastChallengePrompt and evaluation.rationale; do not jump to a different topic. Use payload.recentAttempts and payload.previousMisconceptionSummary to keep pressure on repeat failure and same misconception repeated patterns. Never stack two follow-up asks in one message. Keep the question wording provocative and irritated without adding extra sentences. Always reply in Korean informal speech (banmal), never honorific style, including -시- forms.',
   teach:
-    'Return {"text":"...","challengePrompt":"..."} where text gives a brief correction for the exact failure point and challengePrompt gives exactly one re-check question on the same sub-concept as thread.lastChallengePrompt. Rebuild a short answer scaffold for the precise question they failed, not a generic recap. Use payload.recentAttempts, payload.latestTeachingMemory, and payload.previousMisconceptionSummary to avoid repeating the same generic explanation when the same misconception repeated. If the user explicitly says they do not know (for example "잘 모르겠어", "모르겠어", "몰라"), treat it as a learning request, not evasion: you may open with one short rivalry taunt, then immediately give a concrete explanation in 1-2 sentences before asking the re-check question. Keep the taunt about answer quality only, never about identity/intelligence. Do not use wording that frames the user as dodging (for example "회피"). If the user says "that/it/why that" ambiguously, treat it as referring to thread.lastChallengePrompt first (fallback: thread.lastAssistantPrompt) and explain directly instead of asking what it means. The tone should be sharp, slightly mocking, and competitive, not kind.',
+    'Return {"text":"...","challengePrompt":"..."} where text gives a brief correction for the exact failure point and challengePrompt gives exactly one re-check question. When the user is blocked, challengePrompt should be one prerequisite step narrower than thread.lastChallengePrompt (for example move from mechanism to definition) instead of repeating the same broad question. Rebuild a short answer scaffold for the precise question they failed, not a generic recap. Use payload.recentAttempts, payload.latestTeachingMemory, and payload.previousMisconceptionSummary to avoid repeating the same generic explanation when the same misconception repeated. If the user explicitly says they do not know (for example "잘 모르겠어", "모르겠어", "몰라"), treat it as a learning request, not evasion: you may open with one short rivalry taunt, then immediately give a concrete explanation in 1-2 sentences before asking the re-check question. Keep the taunt about answer quality only, never about identity/intelligence. Do not use wording that frames the user as dodging (for example "회피"). If the user says "that/it/why that" ambiguously, treat it as referring to thread.lastChallengePrompt first (fallback: thread.lastAssistantPrompt) and explain directly instead of asking what it means. The tone should be sharp, slightly mocking, and competitive, not kind. Always reply in Korean informal speech (banmal), never honorific style, and avoid -시- honorific constructions.',
   answer_counterquestion:
     'Return {"text":"...","resolved":true|false}. Set resolved=false only if the user will likely continue the side question. If the user uses ambiguous references like "that/it/why that", resolve them to thread.lastChallengePrompt first (fallback: thread.lastAssistantPrompt) and answer directly. Do not bounce back with "what do you mean by that?" unless there is a real contradiction. Always reply in Korean informal speech (banmal), never honorific style. Before returning, run a strict style pass and rewrite any honorific ending (for example 요/예요/이에요/죠/나요/까요/습니다/세요) into banmal. Never produce clipped pseudo-banmal by deleting only "요"; rewrite the whole ending to a natural banmal form. Answer in a rival tone that still keeps the discussion moving.',
   direct_question:
@@ -203,6 +227,7 @@ const TASK_EXECUTION_PROFILE = {
   topic: { reasoningEffort: "medium" },
   question: { reasoningEffort: "medium" },
   evaluate: { reasoningEffort: "high" },
+  classify_study_turn: { reasoningEffort: "medium" },
   followup: { reasoningEffort: "medium" },
   teach: { reasoningEffort: "medium" },
   answer_counterquestion: { reasoningEffort: "medium" },
@@ -457,6 +482,13 @@ function normalizeBanmalText(text) {
   const endingBoundary = String.raw`(?=\s*(?:["'”’)\]]*[.!?,…~]|$))`;
   const questionBoundary = String.raw`(?=\s*(?:["'”’)\]]*[?!]|$))`;
   const replacements = [
+    [new RegExp(`해보시겠어요${questionBoundary}`, "gu"), "해볼래"],
+    [new RegExp(`해보시겠어${questionBoundary}`, "gu"), "해볼래"],
+    [new RegExp(`해주시겠어요${questionBoundary}`, "gu"), "해줄래"],
+    [new RegExp(`해주시겠어${questionBoundary}`, "gu"), "해줄래"],
+    [new RegExp(`시겠어요${questionBoundary}`, "gu"), "겠어"],
+    [new RegExp(`시겠어${questionBoundary}`, "gu"), "겠어"],
+    [new RegExp(`시겠습니다${endingBoundary}`, "gu"), "겠어"],
     [new RegExp(`이죠${endingBoundary}`, "gu"), "이지"],
     [new RegExp(`죠${endingBoundary}`, "gu"), "지"],
     [new RegExp(`뭐예요${questionBoundary}`, "gu"), "뭐야"],
@@ -509,6 +541,7 @@ const BANMAL_TASK_TYPES = new Set([
 
 const SESSION_AWARE_TASKS = new Set([
   "question",
+  "classify_study_turn",
   "evaluate",
   "followup",
   "teach",

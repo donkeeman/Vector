@@ -20,6 +20,12 @@ const NOOP_LOGGER = {
   debug() {},
   error() {},
 };
+const STUDY_TURN_INTENT = {
+  ANSWER_ATTEMPT: "answer_attempt",
+  CLARIFICATION_REQUEST: "clarification_request",
+  SIDE_COUNTERQUESTION: "side_counterquestion",
+};
+const SIDE_COUNTERQUESTION_CONFIDENCE_THRESHOLD = 0.7;
 
 export function createTutorThreadHandler({
   store,
@@ -57,13 +63,22 @@ export function createTutorThreadHandler({
     const repliedThread = applyUserReplyMetadata(stackReadyThread, now);
     await store.saveThread(repliedThread);
 
-    if (looksLikeCounterQuestion(text)) {
-      const counterThread = markThreadAsCounterQuestion(repliedThread, now);
+    const classifiedTurn = await classifyStudyTurnIntent({
+      llmRunner,
+      logger,
+      thread: repliedThread,
+      text,
+    });
+    const intentBoundThread = mergeCodexSessionId(repliedThread, classifiedTurn.codexSessionId);
+
+    if (classifiedTurn.intent === STUDY_TURN_INTENT.SIDE_COUNTERQUESTION) {
+      const counterThread = markThreadAsCounterQuestion(intentBoundThread, now);
       await store.saveThread(counterThread);
 
       const answer = await llmRunner.runTask("answer_counterquestion", {
         thread: counterThread,
         text,
+        turnIntent: STUDY_TURN_INTENT.SIDE_COUNTERQUESTION,
         lastAssistantPrompt: counterThread.lastAssistantPrompt ?? null,
         lastChallengePrompt: getChallengePrompt(counterThread),
         codexSessionId: counterThread.codexSessionId ?? null,
@@ -88,6 +103,40 @@ export function createTutorThreadHandler({
       };
     }
 
+    if (classifiedTurn.intent === STUDY_TURN_INTENT.CLARIFICATION_REQUEST) {
+      const clarification = await llmRunner.runTask("answer_counterquestion", {
+        thread: intentBoundThread,
+        text,
+        turnIntent: STUDY_TURN_INTENT.CLARIFICATION_REQUEST,
+        lastAssistantPrompt: intentBoundThread.lastAssistantPrompt ?? null,
+        lastChallengePrompt: getChallengePrompt(intentBoundThread),
+        codexSessionId: intentBoundThread.codexSessionId ?? null,
+      });
+      const clarifiedThread = setThreadPrompts(
+        mergeCodexSessionId(
+          {
+            ...intentBoundThread,
+            mode: "evaluation",
+          },
+          clarification.codexSessionId,
+        ),
+        {
+          assistantPrompt: clarification.text,
+          challengePrompt: getChallengePrompt(intentBoundThread),
+        },
+      );
+      await slackClient.postThreadReply(
+        threadTs,
+        decorateStudyMessage(clarification.text, clarifiedThread),
+      );
+      const waitingClarifiedThread = applyAwaitingUserReplyMetadata(clarifiedThread, now);
+      await store.saveThread(waitingClarifiedThread);
+      return {
+        thread: waitingClarifiedThread,
+        shouldScheduleNextQuestion: false,
+      };
+    }
+
     const currentMemory =
       (await store.getTopicMemory(repliedThread.topicId)) ?? createEmptyTopicMemory();
     const retrievalContext = await loadRetrievalContext({
@@ -96,11 +145,11 @@ export function createTutorThreadHandler({
       topicMemory: currentMemory,
     });
     const evaluation = await llmRunner.runTask("evaluate", {
-      thread: repliedThread,
+      thread: intentBoundThread,
       text,
-      lastAssistantPrompt: repliedThread.lastAssistantPrompt ?? null,
-      lastChallengePrompt: getChallengePrompt(repliedThread),
-      codexSessionId: repliedThread.codexSessionId ?? null,
+      lastAssistantPrompt: intentBoundThread.lastAssistantPrompt ?? null,
+      lastChallengePrompt: getChallengePrompt(intentBoundThread),
+      codexSessionId: intentBoundThread.codexSessionId ?? null,
       topicMemory: currentMemory,
       recentAttempts: retrievalContext.recentAttempts,
       latestTeachingMemory: retrievalContext.latestTeachingMemory,
@@ -108,7 +157,7 @@ export function createTutorThreadHandler({
       previousTeachingSummary: retrievalContext.previousTeachingSummary,
     });
     const normalizedEvaluation = normalizeEvaluationResult(text, evaluation);
-    const sessionBoundThread = mergeCodexSessionId(repliedThread, normalizedEvaluation.codexSessionId);
+    const sessionBoundThread = mergeCodexSessionId(intentBoundThread, normalizedEvaluation.codexSessionId);
 
     await store.saveAttempt({
       threadTs,
@@ -369,9 +418,90 @@ function normalizeEvaluationResult(text, evaluation) {
   return evaluation;
 }
 
+async function classifyStudyTurnIntent({ llmRunner, logger, thread, text }) {
+  const normalizedText = String(text ?? "").trim();
+  if (!looksLikeCounterQuestion(normalizedText)) {
+    return {
+      intent: STUDY_TURN_INTENT.ANSWER_ATTEMPT,
+      codexSessionId: null,
+    };
+  }
+
+  try {
+    const classification = await llmRunner.runTask("classify_study_turn", {
+      thread,
+      text: normalizedText,
+      lastAssistantPrompt: thread.lastAssistantPrompt ?? null,
+      lastChallengePrompt: getChallengePrompt(thread),
+      codexSessionId: thread.codexSessionId ?? null,
+    });
+    return {
+      intent: normalizeStudyTurnIntent(normalizedText, classification),
+      codexSessionId: classification?.codexSessionId ?? null,
+    };
+  } catch (error) {
+    logger.error("tutor_bot.turn_classification_failed", {
+      threadTs: thread?.slackThreadTs ?? null,
+      message: error?.message ?? String(error),
+    });
+    return {
+      intent: looksExplicitlyStuckAnswer(normalizedText)
+        ? STUDY_TURN_INTENT.ANSWER_ATTEMPT
+        : STUDY_TURN_INTENT.CLARIFICATION_REQUEST,
+      codexSessionId: null,
+    };
+  }
+}
+
+function normalizeStudyTurnIntent(text, classification) {
+  if (looksExplicitlyStuckAnswer(text)) {
+    return STUDY_TURN_INTENT.ANSWER_ATTEMPT;
+  }
+
+  const rawIntent = typeof classification?.intent === "string"
+    ? classification.intent.trim()
+    : "";
+  const confidence = normalizeConfidence(classification?.confidence);
+
+  if (rawIntent === STUDY_TURN_INTENT.ANSWER_ATTEMPT) {
+    return STUDY_TURN_INTENT.ANSWER_ATTEMPT;
+  }
+
+  if (rawIntent === STUDY_TURN_INTENT.CLARIFICATION_REQUEST) {
+    return STUDY_TURN_INTENT.CLARIFICATION_REQUEST;
+  }
+
+  if (rawIntent === STUDY_TURN_INTENT.SIDE_COUNTERQUESTION) {
+    if (confidence !== null && confidence < SIDE_COUNTERQUESTION_CONFIDENCE_THRESHOLD) {
+      return STUDY_TURN_INTENT.CLARIFICATION_REQUEST;
+    }
+    return STUDY_TURN_INTENT.SIDE_COUNTERQUESTION;
+  }
+
+  // 질문형 입력인데 intent가 불명확하면 side branch 대신 설명 요청으로 처리합니다.
+  return STUDY_TURN_INTENT.CLARIFICATION_REQUEST;
+}
+
 function looksExplicitlyStuckAnswer(text) {
   const normalized = String(text ?? "").toLowerCase();
   return /모르겠|잘 모르|정확히는 모르|헷갈|까먹|기억 안 나|모르는데|모르겠는데/u.test(normalized);
+}
+
+function normalizeConfidence(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  if (parsed < 0) {
+    return 0;
+  }
+
+  if (parsed > 1) {
+    return 1;
+  }
+
+  return parsed;
 }
 
 function mergeRationale(rationale, addition) {

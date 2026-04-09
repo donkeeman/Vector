@@ -6,6 +6,11 @@ import {
   pickReviewTopic,
   selectStudyLane,
 } from "../domain/topic-memory.js";
+import {
+  applyDirectQaOperation,
+  createDirectQaStackState,
+} from "../domain/direct-qa-stack-policy.js";
+import { appendStudyStackDebugText } from "./study-stack-debug.js";
 
 const NOOP_LOGGER = {
   debug() {},
@@ -21,6 +26,7 @@ export function createTutorQuestionDispatcher({
   topics,
   topicSelector = pickTopicForContinuousFlow,
   random = Math.random,
+  includeStudyStackDebug = false,
   logger = NOOP_LOGGER,
 }) {
   let dispatchInFlight = null;
@@ -58,7 +64,10 @@ export function createTutorQuestionDispatcher({
     if (hasOpenStudyThread) {
       const reminderThread = pickReminderCandidateThread(openStudyThreads, now);
       if (reminderThread) {
-        await slackClient.postThreadReply(reminderThread.slackThreadTs, UNANSWERED_REMINDER_REPLY);
+        await slackClient.postThreadReply(
+          reminderThread.slackThreadTs,
+          appendStudyStackDebugText(UNANSWERED_REMINDER_REPLY, reminderThread, includeStudyStackDebug),
+        );
         const remindedThread = applyReminderMetadata(reminderThread, now);
         await store.saveThread(remindedThread);
         logger.debug("tutor_bot.dispatch_sent_unanswered_reminder", {
@@ -127,13 +136,35 @@ export function createTutorQuestionDispatcher({
       previousMisconceptionSummary: retrievalContext.previousMisconceptionSummary,
       previousTeachingSummary: retrievalContext.previousTeachingSummary,
     });
-    const message = await slackClient.postDirectMessage(question.text);
+    const seededStack = applyDirectQaOperation(createDirectQaStackState(), {
+      operation: "push",
+      nextPrompt: question.text,
+      now,
+    }).stack;
+    const message = await slackClient.postDirectMessage(
+      appendStudyStackDebugText(
+        question.text,
+        {
+          kind: "study",
+          directQaStack: seededStack,
+          directQaStackSealed: seededStack.sealed,
+          studyQuestionRound: Math.max(1, seededStack.frames.length),
+          studyQuestionRoundLimit: Math.max(1, seededStack.maxDepth),
+          blockedOnce: false,
+        },
+        includeStudyStackDebug,
+      ),
+    );
     const thread = createThreadState({
       slackThreadTs: message.ts,
       topicId: topic.id,
       openedAt: now,
+      studyQuestionRound: Math.max(1, seededStack.frames.length),
+      studyQuestionRoundLimit: Math.max(1, seededStack.maxDepth),
       lastAssistantPrompt: question.text,
       lastChallengePrompt: question.text,
+      directQaStack: seededStack,
+      directQaStackSealed: seededStack.sealed,
       codexSessionId: question.codexSessionId ?? null,
     });
 

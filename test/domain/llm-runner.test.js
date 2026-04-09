@@ -149,6 +149,14 @@ test("study 평가/꼬리질문/교정 지시는 lastChallengePrompt를 기준�
   assert.match(source, /teach[\s\S]*challengePrompt/u);
 });
 
+test("study turn 분류 지시는 답변/설명요청/사이드질문을 구분하고 모호하면 설명요청을 우선한다", () => {
+  const source = readFileSync(new URL("../../src/llm/codex-cli-runner.js", import.meta.url), "utf8");
+
+  assert.match(source, /classify_study_turn[\s\S]*answer_attempt\|clarification_request\|side_counterquestion/u);
+  assert.match(source, /classify_study_turn[\s\S]*Prefer clarification_request over side_counterquestion/u);
+  assert.match(source, /classify_study_turn[\s\S]*thread\.lastChallengePrompt/u);
+});
+
 test("study 지시는 retrieval context와 반복 패턴 해석 규칙을 포함한다", () => {
   const source = readFileSync(new URL("../../src/llm/codex-cli-runner.js", import.meta.url), "utf8");
 
@@ -269,6 +277,18 @@ test("direct Q&A task는 codex session id가 있으면 resume 경로를 쓴다",
   assert.doesNotMatch(args.join(" "), /--ephemeral/u);
 });
 
+test("classify_study_turn task도 session-aware json 경로를 사용한다", () => {
+  const args = buildCodexExecArgs({
+    taskType: "classify_study_turn",
+    outputPath: "/tmp/classify-study-turn.json",
+    prompt: "classify prompt",
+    model: "gpt-5.4",
+  });
+
+  assert.match(args.join(" "), /--json/u);
+  assert.doesNotMatch(args.join(" "), /--ephemeral/u);
+});
+
 test("codex json stdout에서 thread.started 이벤트의 id를 뽑아낸다", () => {
   const threadId = parseCodexThreadIdFromStdout([
     "{\"type\":\"turn.started\"}",
@@ -373,5 +393,16 @@ test("반말 후처리는 '-겠습니다/-겠어요' 존댓말 종결도 반말�
   assert.equal(
     normalized,
     "이번 정도는 맞췄다고 처리하겠어. 다음엔 더 정확히 보겠어.",
+  );
+});
+
+test("반말 후처리는 '-해보시겠어/-해주시겠어' 같은 시높임 질문형도 반말로 정규화한다", () => {
+  const normalized = normalizeBanmalText(
+    "실행 계획을 한 문장으로 정의해보시겠어? 필요하면 한 번 더 설명해주시겠어?",
+  );
+
+  assert.equal(
+    normalized,
+    "실행 계획을 한 문장으로 정의해볼래? 필요하면 한 번 더 설명해줄래?",
   );
 });

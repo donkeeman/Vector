@@ -1,13 +1,7 @@
 import { normalizeControlCommand } from "./control-command.js";
 import { looksLikeCounterQuestion } from "./counter-question.js";
 import { getDirectQaShortcutReply } from "./direct-qa-shortcut.js";
-import { closeThread, createThreadState } from "../domain/thread-policy.js";
-import {
-  applyDirectQaOperation,
-  createDirectQaStackState,
-  getDirectQaTopPrompt,
-  normalizeDirectQaStackState,
-} from "../domain/direct-qa-stack-policy.js";
+import { createThreadState } from "../domain/thread-policy.js";
 import { previewText } from "../debug/debug-logger.js";
 
 const ROOT_REPLY_REDIRECT_TEXT =
@@ -366,39 +360,24 @@ function looksLikeDirectQuestion(text) {
 
 function applyDirectQaReplyState(thread, reply, now = new Date()) {
   const normalizedThread = normalizeDirectQaThread(thread);
-  const derivedOperation = deriveDirectQaOperation(normalizedThread, reply);
-  const transition = applyDirectQaOperation(normalizedThread.directQaStack, {
-    operation: derivedOperation.operation,
-    nextPrompt: derivedOperation.nextPrompt,
-    passQuality: reply?.passQuality ?? null,
-    now,
-  });
-  const topPrompt = getDirectQaTopPrompt(transition.stack);
-  const isAwaitingAnswer = Boolean(topPrompt);
+  const challengePrompt = normalizeText(reply?.challengePrompt ?? reply?.nextPrompt);
+  const isAwaitingAnswer = reply?.nextState === "awaiting_answer" && Boolean(challengePrompt);
+  const assistantPrompt = isAwaitingAnswer
+    ? challengePrompt
+    : (normalizeText(reply?.text) ?? normalizedThread.lastAssistantPrompt ?? null);
 
-  const nextThread = {
+  return {
     ...normalizedThread,
     status: "open",
     closedAt: null,
     mode: "direct_qa",
     directQaState: isAwaitingAnswer ? "awaiting_answer" : "open",
-    lastAssistantPrompt: isAwaitingAnswer ? topPrompt : null,
-    lastChallengePrompt: isAwaitingAnswer ? topPrompt : null,
-    directQaStack: transition.stack,
-    directQaStackSealed: transition.stack.sealed,
+    lastAssistantPrompt: assistantPrompt,
+    lastChallengePrompt: isAwaitingAnswer ? challengePrompt : null,
+    directQaStack: null,
+    directQaStackSealed: false,
     codexSessionId: reply?.codexSessionId ?? normalizedThread.codexSessionId ?? null,
   };
-
-  if (transition.shouldClose) {
-    return closeThread({
-      ...nextThread,
-      directQaState: "open",
-      lastAssistantPrompt: null,
-      lastChallengePrompt: null,
-    }, "mastered", now);
-  }
-
-  return nextThread;
 }
 
 function normalizeDirectQaReply(reply) {
@@ -434,75 +413,15 @@ function normalizeDirectQaReply(reply) {
 }
 
 function normalizeDirectQaThread(thread) {
-  const directQaStack = normalizeDirectQaStackState(thread.directQaStack ?? createDirectQaStackState());
-  if (thread.directQaStackSealed === true) {
-    directQaStack.sealed = true;
-  }
-
-  const awaitingAnswerPrompt = normalizeText(thread.lastChallengePrompt);
-  if (
-    directQaStack.frames.length === 0
-    && thread.directQaState === "awaiting_answer"
-    && awaitingAnswerPrompt
-  ) {
-    directQaStack.frames.push({
-      id: "legacy-root",
-      prompt: awaitingAnswerPrompt,
-      weakPassUsed: false,
-      createdAt: null,
-    });
-  }
-
-  const topPrompt = getDirectQaTopPrompt(directQaStack);
-
   return {
     ...thread,
     mode: "direct_qa",
-    directQaState: topPrompt ? "awaiting_answer" : "open",
-    lastAssistantPrompt: topPrompt ?? thread.lastAssistantPrompt ?? null,
-    lastChallengePrompt: topPrompt ?? thread.lastChallengePrompt ?? null,
-    directQaStack,
-    directQaStackSealed: directQaStack.sealed,
+    status: "open",
+    closedAt: null,
+    directQaState: thread.directQaState === "awaiting_answer" ? "awaiting_answer" : "open",
+    directQaStack: null,
+    directQaStackSealed: false,
     codexSessionId: thread.codexSessionId ?? null,
-  };
-}
-
-function deriveDirectQaOperation(thread, reply) {
-  if (reply?.operation) {
-    return {
-      operation: normalizeOperation(reply.operation) ?? "stay",
-      nextPrompt: normalizeText(reply.nextPrompt),
-    };
-  }
-
-  const legacyState = reply?.nextState === "awaiting_answer" ? "awaiting_answer" : "open";
-  const legacyPrompt = normalizeText(reply?.challengePrompt);
-  const hasPendingChallenge = thread.directQaState === "awaiting_answer"
-    || thread.directQaStack.frames.length > 0;
-
-  if (legacyState === "awaiting_answer") {
-    if (hasPendingChallenge) {
-      return {
-        operation: "stay",
-        nextPrompt: legacyPrompt ?? getDirectQaTopPrompt(thread.directQaStack),
-      };
-    }
-    return {
-      operation: "push",
-      nextPrompt: legacyPrompt,
-    };
-  }
-
-  if (hasPendingChallenge) {
-    return {
-      operation: "pop",
-      nextPrompt: null,
-    };
-  }
-
-  return {
-    operation: "stay",
-    nextPrompt: legacyPrompt,
   };
 }
 

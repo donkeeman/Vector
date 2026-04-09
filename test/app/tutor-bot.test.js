@@ -1634,7 +1634,7 @@ test("사용자가 명시적으로 막혔다고 하면 mastered 평가여도 blo
   assert.equal(result.shouldScheduleNextQuestion, false);
 });
 
-test("counterquestion/teach/evaluate payload는 lastAssistantPrompt를 함께 넘긴다", async () => {
+test("study turn 분류/역질문/teach/evaluate payload는 lastAssistantPrompt를 함께 넘긴다", async () => {
   const store = createInMemoryStore();
   store.threads.set(
     "111.888",
@@ -1653,6 +1653,14 @@ test("counterquestion/teach/evaluate payload는 lastAssistantPrompt를 함께 �
     llmRunner: {
       async runTask(type, payload) {
         llmCalls.push({ type, payload });
+        if (type === "classify_study_turn") {
+          return {
+            intent: "side_counterquestion",
+            confidence: 0.92,
+            rationale: "직전 질문의 근거를 묻는 부가 질문",
+            codexSessionId: "study-session-1",
+          };
+        }
         if (type === "answer_counterquestion") {
           return {
             text: "좋아, 그 질문 기준으로 설명한다.",
@@ -1689,7 +1697,7 @@ test("counterquestion/teach/evaluate payload는 lastAssistantPrompt를 함께 �
 
   await bot.handleThreadMessage({
     threadTs: "111.888",
-    text: "그건 왜인지 모르겠어?",
+    text: "그건 왜 그래?",
     now: new Date("2026-03-10T09:05:00+09:00"),
   });
 
@@ -1699,23 +1707,19 @@ test("counterquestion/teach/evaluate payload는 lastAssistantPrompt를 함께 �
     now: new Date("2026-03-10T09:06:00+09:00"),
   });
 
-  assert.equal(llmCalls[0].type, "answer_counterquestion");
+  assert.equal(llmCalls[0].type, "classify_study_turn");
   assert.equal(
     llmCalls[0].payload.lastAssistantPrompt,
     "process.nextTick이 Promise보다 먼저인 이유를 설명해봐.",
   );
   assert.equal(llmCalls[0].payload.codexSessionId, null);
-  assert.equal(llmCalls[1].type, "evaluate");
+  assert.equal(llmCalls[1].type, "answer_counterquestion");
   assert.equal(
     llmCalls[1].payload.lastAssistantPrompt,
-    "좋아, 그 질문 기준으로 설명한다.",
-  );
-  assert.equal(
-    llmCalls[1].payload.lastChallengePrompt,
     "process.nextTick이 Promise보다 먼저인 이유를 설명해봐.",
   );
-  assert.equal(llmCalls[1].payload.codexSessionId, "study-session-2");
-  assert.equal(llmCalls[2].type, "teach");
+  assert.equal(llmCalls[1].payload.codexSessionId, "study-session-1");
+  assert.equal(llmCalls[2].type, "evaluate");
   assert.equal(
     llmCalls[2].payload.lastAssistantPrompt,
     "좋아, 그 질문 기준으로 설명한다.",
@@ -1725,11 +1729,93 @@ test("counterquestion/teach/evaluate payload는 lastAssistantPrompt를 함께 �
     "process.nextTick이 Promise보다 먼저인 이유를 설명해봐.",
   );
   assert.equal(llmCalls[2].payload.codexSessionId, "study-session-2");
+  assert.equal(llmCalls[3].type, "teach");
+  assert.equal(
+    llmCalls[3].payload.lastAssistantPrompt,
+    "좋아, 그 질문 기준으로 설명한다.",
+  );
+  assert.equal(
+    llmCalls[3].payload.lastChallengePrompt,
+    "process.nextTick이 Promise보다 먼저인 이유를 설명해봐.",
+  );
+  assert.equal(llmCalls[3].payload.codexSessionId, "study-session-2");
   assert.equal(store.threads.get("111.888")?.codexSessionId, "study-session-2");
   assert.equal(
     store.threads.get("111.888")?.lastChallengePrompt,
     "그럼 다시. nextTick이 Promise보다 먼저인 이유를 단계별로 설명해봐.",
   );
+});
+
+test("질문형 입력이어도 사용자가 막혔다고 명시하면 분류 결과보다 answer_attempt(blocked) 가드를 우선한다", async () => {
+  const store = createInMemoryStore();
+  store.threads.set(
+    "111.8899",
+    createThreadState({
+      slackThreadTs: "111.8899",
+      topicId: "raft",
+      openedAt: new Date("2026-03-10T09:00:00+09:00"),
+      lastAssistantPrompt: "Raft에서 term이 뭐야?",
+      lastChallengePrompt: "Raft에서 term이 뭐야?",
+    }),
+  );
+
+  const llmCalls = [];
+  const bot = new TutorBot({
+    store,
+    topics: [],
+    llmRunner: {
+      async runTask(type, payload) {
+        llmCalls.push({ type, payload });
+
+        if (type === "classify_study_turn") {
+          return {
+            intent: "clarification_request",
+            confidence: 0.95,
+            rationale: "설명 요청",
+          };
+        }
+
+        if (type === "evaluate") {
+          return {
+            outcome: "continue",
+            rationale: "내용이 비어 있음",
+          };
+        }
+
+        if (type === "teach") {
+          return {
+            text: "좋아, 핵심부터 다시 잡자. term은 선거 라운드를 구분하는 증가 번호야.",
+            challengePrompt: "그럼 다시. term이 단순 시간이 아니라 권한 기준인 이유를 말해봐.",
+          };
+        }
+
+        throw new Error(`unexpected task: ${type}`);
+      },
+    },
+    slackClient: {
+      async postDirectMessage() {
+        throw new Error("should not be called");
+      },
+      async postThreadReply() {
+        return { ok: true };
+      },
+    },
+  });
+
+  const result = await bot.handleThreadMessage({
+    threadTs: "111.8899",
+    text: "자세히는 모르겠지만 시간 관련 같아. 뭐야?",
+    now: new Date("2026-03-10T09:06:00+09:00"),
+  });
+
+  assert.deepEqual(llmCalls.map(({ type }) => type), [
+    "classify_study_turn",
+    "evaluate",
+    "teach",
+  ]);
+  assert.equal(result.thread.status, "open");
+  assert.equal(result.thread.blockedOnce, true);
+  assert.equal(store.attempts.at(-1)?.outcome, "blocked");
 });
 
 test("evaluate/followup/teach payload는 retrieval context를 함께 넘긴다", async () => {
@@ -1967,11 +2053,21 @@ test("모호한 지시어 counterquestion도 직전 질문(lastAssistantPrompt)�
   );
 
   const replies = [];
+  const llmCalls = [];
   const bot = new TutorBot({
     store,
     topics: [],
     llmRunner: {
       async runTask(type, payload) {
+        llmCalls.push({ type, payload });
+        if (type === "classify_study_turn") {
+          return {
+            intent: "side_counterquestion",
+            confidence: 0.9,
+            rationale: "직전 질문 근거를 재질문",
+          };
+        }
+
         if (type !== "answer_counterquestion") {
           throw new Error(`unexpected task: ${type}`);
         }
@@ -1999,9 +2095,14 @@ test("모호한 지시어 counterquestion도 직전 질문(lastAssistantPrompt)�
 
   const result = await bot.handleThreadMessage({
     threadTs: "111.777",
-    text: "그건 왜인지 모르겠어. 설명해줄래?",
+    text: "왜 그래?",
     now: new Date("2026-03-10T09:06:00+09:00"),
   });
+
+  assert.deepEqual(llmCalls.map(({ type }) => type), [
+    "classify_study_turn",
+    "answer_counterquestion",
+  ]);
 
   assert.deepEqual(replies, [
     {
@@ -2014,6 +2115,80 @@ test("모호한 지시어 counterquestion도 직전 질문(lastAssistantPrompt)�
     result.thread.lastAssistantPrompt,
     "좋아, 그 질문 기준으로 설명한다. nextTick 큐를 먼저 비운 뒤 Promise microtask로 넘어간다.",
   );
+});
+
+test("clarification_request 분류면 side counterquestion 상태로 가지 않고 설명 후 evaluation 모드로 대기한다", async () => {
+  const store = createInMemoryStore();
+  store.threads.set(
+    "111.778",
+    createThreadState({
+      slackThreadTs: "111.778",
+      topicId: "raft",
+      openedAt: new Date("2026-03-10T09:00:00+09:00"),
+      lastAssistantPrompt: "Raft에서 term이 뭐야?",
+      lastChallengePrompt: "Raft에서 term이 뭐야?",
+    }),
+  );
+
+  const llmCalls = [];
+  const replies = [];
+  const bot = new TutorBot({
+    store,
+    topics: [],
+    llmRunner: {
+      async runTask(type, payload) {
+        llmCalls.push({ type, payload });
+        if (type === "classify_study_turn") {
+          return {
+            intent: "clarification_request",
+            confidence: 0.88,
+            rationale: "같은 질문에 대한 재설명 요청",
+            codexSessionId: "study-session-clarify",
+          };
+        }
+
+        if (type === "answer_counterquestion") {
+          return {
+            text: "term은 선거 라운드를 구분하는 증가 번호야.",
+            resolved: true,
+            codexSessionId: "study-session-clarify",
+          };
+        }
+
+        throw new Error(`unexpected task: ${type}`);
+      },
+    },
+    slackClient: {
+      async postDirectMessage() {
+        throw new Error("should not be called");
+      },
+      async postThreadReply(threadTs, text) {
+        replies.push({ threadTs, text });
+        return { ok: true };
+      },
+    },
+  });
+
+  const result = await bot.handleThreadMessage({
+    threadTs: "111.778",
+    text: "term이 뭐야?",
+    now: new Date("2026-03-10T09:06:00+09:00"),
+  });
+
+  assert.deepEqual(llmCalls.map(({ type }) => type), [
+    "classify_study_turn",
+    "answer_counterquestion",
+  ]);
+  assert.deepEqual(replies, [
+    {
+      threadTs: "111.778",
+      text: "term은 선거 라운드를 구분하는 증가 번호야.",
+    },
+  ]);
+  assert.equal(result.thread.mode, "evaluation");
+  assert.equal(result.thread.status, "open");
+  assert.equal(result.thread.lastChallengePrompt, "Raft에서 term이 뭐야?");
+  assert.equal(result.thread.codexSessionId, "study-session-clarify");
 });
 
 test("study 스레드는 1라운드에서 mastered면 즉시 패스 처리하고 닫는다", async () => {

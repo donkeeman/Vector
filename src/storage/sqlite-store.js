@@ -59,6 +59,8 @@ export class SqliteStore {
         kind TEXT NOT NULL DEFAULT 'study',
         status TEXT NOT NULL,
         mode TEXT NOT NULL,
+        study_question_round INTEGER NOT NULL DEFAULT 1,
+        study_question_round_limit INTEGER NOT NULL DEFAULT 5,
         codex_session_id TEXT,
         direct_qa_state TEXT,
         last_assistant_prompt TEXT,
@@ -195,6 +197,8 @@ export class SqliteStore {
         kind,
         status,
         mode,
+        study_question_round,
+        study_question_round_limit,
         codex_session_id,
         direct_qa_state,
         last_assistant_prompt,
@@ -215,6 +219,8 @@ export class SqliteStore {
         ${toSqlString(thread.kind ?? "study")},
         ${toSqlString(normalizedStatus)},
         ${toSqlString(thread.mode)},
+        ${toSqlNumber(resolveStudyQuestionRound(thread))},
+        ${toSqlNumber(resolveStudyQuestionRoundLimit(thread))},
         ${toSqlString(thread.codexSessionId)},
         ${toSqlString(thread.directQaState)},
         ${toSqlString(thread.lastAssistantPrompt)},
@@ -235,6 +241,8 @@ export class SqliteStore {
         kind = excluded.kind,
         status = excluded.status,
         mode = excluded.mode,
+        study_question_round = excluded.study_question_round,
+        study_question_round_limit = excluded.study_question_round_limit,
         codex_session_id = excluded.codex_session_id,
         direct_qa_state = excluded.direct_qa_state,
         last_assistant_prompt = excluded.last_assistant_prompt,
@@ -504,6 +512,8 @@ export class SqliteStore {
   async #ensureThreadColumns() {
     const columns = await this.#query("PRAGMA table_info(threads);");
     await this.#ensureColumn("threads", columns, "kind", "TEXT NOT NULL DEFAULT 'study'");
+    await this.#ensureColumn("threads", columns, "study_question_round", "INTEGER NOT NULL DEFAULT 1");
+    await this.#ensureColumn("threads", columns, "study_question_round_limit", "INTEGER NOT NULL DEFAULT 5");
     await this.#ensureColumn("threads", columns, "codex_session_id", "TEXT");
     await this.#ensureColumn("threads", columns, "direct_qa_state", "TEXT");
     await this.#ensureColumn("threads", columns, "last_assistant_prompt", "TEXT");
@@ -626,9 +636,25 @@ function toSqlInteger(value) {
   return value ? 1 : 0;
 }
 
+function toSqlNumber(value) {
+  if (value === null || value === undefined) {
+    return "NULL";
+  }
+
+  return Number(value);
+}
+
 function mapThreadRow(row) {
   const status = row.status;
   const kind = row.kind ?? "study";
+  const studyQuestionRound = resolveStudyQuestionRoundFromRow({
+    kind,
+    studyQuestionRound: row.study_question_round,
+  });
+  const studyQuestionRoundLimit = resolveStudyQuestionRoundLimitFromRow({
+    kind,
+    studyQuestionRoundLimit: row.study_question_round_limit,
+  });
   const directQaStack = mapDirectQaStack({
     kind,
     directQaState: row.direct_qa_state ?? null,
@@ -643,6 +669,8 @@ function mapThreadRow(row) {
     kind,
     status,
     mode: row.mode,
+    studyQuestionRound,
+    studyQuestionRoundLimit,
     codexSessionId: row.codex_session_id ?? null,
     directQaState: row.direct_qa_state ?? null,
     lastAssistantPrompt: row.last_assistant_prompt ?? null,
@@ -658,6 +686,32 @@ function mapThreadRow(row) {
     lastCounterQuestionAt: parseNullableDate(row.last_counter_question_at),
     lastCounterQuestionResolvedAt: parseNullableDate(row.last_counter_question_resolved_at),
   };
+}
+
+function resolveStudyQuestionRoundFromRow({ kind, studyQuestionRound }) {
+  if (kind !== "study") {
+    return null;
+  }
+
+  const parsed = Number(studyQuestionRound ?? 1);
+  if (!Number.isFinite(parsed)) {
+    return 1;
+  }
+
+  return Math.max(1, Math.round(parsed));
+}
+
+function resolveStudyQuestionRoundLimitFromRow({ kind, studyQuestionRoundLimit }) {
+  if (kind !== "study") {
+    return null;
+  }
+
+  const parsed = Number(studyQuestionRoundLimit ?? 5);
+  if (!Number.isFinite(parsed)) {
+    return 5;
+  }
+
+  return Math.max(1, Math.round(parsed));
 }
 
 function normalizeThreadStatusForPersistence(status) {
@@ -866,4 +920,30 @@ function mapDirectQaStack({
   }
 
   return normalized;
+}
+
+function resolveStudyQuestionRound(thread) {
+  if ((thread.kind ?? "study") !== "study") {
+    return 1;
+  }
+
+  const parsed = Number(thread.studyQuestionRound ?? 1);
+  if (!Number.isFinite(parsed)) {
+    return 1;
+  }
+
+  return Math.max(1, Math.round(parsed));
+}
+
+function resolveStudyQuestionRoundLimit(thread) {
+  if ((thread.kind ?? "study") !== "study") {
+    return 5;
+  }
+
+  const parsed = Number(thread.studyQuestionRoundLimit ?? 5);
+  if (!Number.isFinite(parsed)) {
+    return 5;
+  }
+
+  return Math.max(1, Math.round(parsed));
 }
