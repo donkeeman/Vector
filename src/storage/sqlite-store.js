@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { createInactiveSession } from "../domain/session-policy.js";
+import { normalizeDirectQaStackState } from "../domain/direct-qa-stack-policy.js";
 
 const execFileAsync = promisify(execFile);
 const DIRECT_QA_TOPIC_SENTINEL = "__direct_qa__";
@@ -58,10 +59,14 @@ export class SqliteStore {
         kind TEXT NOT NULL DEFAULT 'study',
         status TEXT NOT NULL,
         mode TEXT NOT NULL,
+        study_question_round INTEGER NOT NULL DEFAULT 1,
+        study_question_round_limit INTEGER NOT NULL DEFAULT 5,
         codex_session_id TEXT,
         direct_qa_state TEXT,
         last_assistant_prompt TEXT,
         last_challenge_prompt TEXT,
+        direct_qa_stack_json TEXT,
+        direct_qa_stack_sealed INTEGER NOT NULL DEFAULT 0,
         blocked_once INTEGER NOT NULL DEFAULT 0,
         awaiting_user_reply_at TEXT,
         last_user_reply_at TEXT,
@@ -183,6 +188,7 @@ export class SqliteStore {
   async saveThread(thread) {
     const normalizedStatus = normalizeThreadStatusForPersistence(thread.status);
     const normalizedClosedAt = normalizedStatus === "open" ? null : thread.closedAt;
+    const normalizedDirectQaStack = normalizeDirectQaStackForPersistence(thread);
 
     await this.#execute(`
       INSERT INTO threads (
@@ -191,10 +197,14 @@ export class SqliteStore {
         kind,
         status,
         mode,
+        study_question_round,
+        study_question_round_limit,
         codex_session_id,
         direct_qa_state,
         last_assistant_prompt,
         last_challenge_prompt,
+        direct_qa_stack_json,
+        direct_qa_stack_sealed,
         blocked_once,
         awaiting_user_reply_at,
         last_user_reply_at,
@@ -209,10 +219,14 @@ export class SqliteStore {
         ${toSqlString(thread.kind ?? "study")},
         ${toSqlString(normalizedStatus)},
         ${toSqlString(thread.mode)},
+        ${toSqlNumber(resolveStudyQuestionRound(thread))},
+        ${toSqlNumber(resolveStudyQuestionRoundLimit(thread))},
         ${toSqlString(thread.codexSessionId)},
         ${toSqlString(thread.directQaState)},
         ${toSqlString(thread.lastAssistantPrompt)},
         ${toSqlString(thread.lastChallengePrompt)},
+        ${toSqlString(normalizedDirectQaStack.stackJson)},
+        ${toSqlInteger(normalizedDirectQaStack.sealed)},
         ${toSqlInteger(thread.blockedOnce)},
         ${toSqlDate(thread.awaitingUserReplyAt)},
         ${toSqlDate(thread.lastUserReplyAt)},
@@ -227,10 +241,14 @@ export class SqliteStore {
         kind = excluded.kind,
         status = excluded.status,
         mode = excluded.mode,
+        study_question_round = excluded.study_question_round,
+        study_question_round_limit = excluded.study_question_round_limit,
         codex_session_id = excluded.codex_session_id,
         direct_qa_state = excluded.direct_qa_state,
         last_assistant_prompt = excluded.last_assistant_prompt,
         last_challenge_prompt = excluded.last_challenge_prompt,
+        direct_qa_stack_json = excluded.direct_qa_stack_json,
+        direct_qa_stack_sealed = excluded.direct_qa_stack_sealed,
         blocked_once = excluded.blocked_once,
         awaiting_user_reply_at = excluded.awaiting_user_reply_at,
         last_user_reply_at = excluded.last_user_reply_at,
@@ -494,10 +512,14 @@ export class SqliteStore {
   async #ensureThreadColumns() {
     const columns = await this.#query("PRAGMA table_info(threads);");
     await this.#ensureColumn("threads", columns, "kind", "TEXT NOT NULL DEFAULT 'study'");
+    await this.#ensureColumn("threads", columns, "study_question_round", "INTEGER NOT NULL DEFAULT 1");
+    await this.#ensureColumn("threads", columns, "study_question_round_limit", "INTEGER NOT NULL DEFAULT 5");
     await this.#ensureColumn("threads", columns, "codex_session_id", "TEXT");
     await this.#ensureColumn("threads", columns, "direct_qa_state", "TEXT");
     await this.#ensureColumn("threads", columns, "last_assistant_prompt", "TEXT");
     await this.#ensureColumn("threads", columns, "last_challenge_prompt", "TEXT");
+    await this.#ensureColumn("threads", columns, "direct_qa_stack_json", "TEXT");
+    await this.#ensureColumn("threads", columns, "direct_qa_stack_sealed", "INTEGER NOT NULL DEFAULT 0");
     await this.#ensureColumn("threads", columns, "blocked_once", "INTEGER NOT NULL DEFAULT 0");
     await this.#ensureColumn("threads", columns, "awaiting_user_reply_at", "TEXT");
     await this.#ensureColumn("threads", columns, "last_user_reply_at", "TEXT");
@@ -614,19 +636,47 @@ function toSqlInteger(value) {
   return value ? 1 : 0;
 }
 
+function toSqlNumber(value) {
+  if (value === null || value === undefined) {
+    return "NULL";
+  }
+
+  return Number(value);
+}
+
 function mapThreadRow(row) {
   const status = row.status;
+  const kind = row.kind ?? "study";
+  const studyQuestionRound = resolveStudyQuestionRoundFromRow({
+    kind,
+    studyQuestionRound: row.study_question_round,
+  });
+  const studyQuestionRoundLimit = resolveStudyQuestionRoundLimitFromRow({
+    kind,
+    studyQuestionRoundLimit: row.study_question_round_limit,
+  });
+  const directQaStack = mapDirectQaStack({
+    kind,
+    directQaState: row.direct_qa_state ?? null,
+    lastChallengePrompt: row.last_challenge_prompt ?? null,
+    directQaStackJson: row.direct_qa_stack_json ?? null,
+    directQaStackSealed: Number(row.direct_qa_stack_sealed ?? 0) === 1,
+  });
 
   return {
     slackThreadTs: row.slack_thread_ts,
     topicId: fromStoredTopicId(row.topic_id),
-    kind: row.kind ?? "study",
+    kind,
     status,
     mode: row.mode,
+    studyQuestionRound,
+    studyQuestionRoundLimit,
     codexSessionId: row.codex_session_id ?? null,
     directQaState: row.direct_qa_state ?? null,
     lastAssistantPrompt: row.last_assistant_prompt ?? null,
     lastChallengePrompt: row.last_challenge_prompt ?? null,
+    directQaStack,
+    directQaStackSealed: directQaStack?.sealed ?? (Number(row.direct_qa_stack_sealed ?? 0) === 1),
     blockedOnce: Number(row.blocked_once ?? 0) === 1,
     awaitingUserReplyAt: parseNullableDate(row.awaiting_user_reply_at),
     lastUserReplyAt: parseNullableDate(row.last_user_reply_at),
@@ -636,6 +686,32 @@ function mapThreadRow(row) {
     lastCounterQuestionAt: parseNullableDate(row.last_counter_question_at),
     lastCounterQuestionResolvedAt: parseNullableDate(row.last_counter_question_resolved_at),
   };
+}
+
+function resolveStudyQuestionRoundFromRow({ kind, studyQuestionRound }) {
+  if (kind !== "study") {
+    return null;
+  }
+
+  const parsed = Number(studyQuestionRound ?? 1);
+  if (!Number.isFinite(parsed)) {
+    return 1;
+  }
+
+  return Math.max(1, Math.round(parsed));
+}
+
+function resolveStudyQuestionRoundLimitFromRow({ kind, studyQuestionRoundLimit }) {
+  if (kind !== "study") {
+    return null;
+  }
+
+  const parsed = Number(studyQuestionRoundLimit ?? 5);
+  if (!Number.isFinite(parsed)) {
+    return 5;
+  }
+
+  return Math.max(1, Math.round(parsed));
 }
 
 function normalizeThreadStatusForPersistence(status) {
@@ -759,4 +835,115 @@ function inferLearningStateFromLegacyRow(row) {
   }
 
   return "new";
+}
+
+function normalizeDirectQaStackForPersistence(thread) {
+  const isDirectQa = thread.kind === "direct_qa";
+  if (!isDirectQa && !thread.directQaStack) {
+    return {
+      stackJson: null,
+      sealed: false,
+    };
+  }
+
+  const normalized = normalizeDirectQaStackState(thread.directQaStack);
+  if (thread.directQaStackSealed === true) {
+    normalized.sealed = true;
+  }
+
+  if (
+    isDirectQa
+    && normalized.frames.length === 0
+    && thread.directQaState === "awaiting_answer"
+  ) {
+    const prompt = typeof thread.lastChallengePrompt === "string"
+      ? thread.lastChallengePrompt.trim()
+      : "";
+
+    if (prompt) {
+      normalized.frames.push({
+        id: "legacy-root",
+        prompt,
+        weakPassUsed: false,
+        createdAt: null,
+      });
+    }
+  }
+
+  return {
+    stackJson: JSON.stringify(normalized),
+    sealed: normalized.sealed,
+  };
+}
+
+function mapDirectQaStack({
+  kind,
+  directQaState,
+  lastChallengePrompt,
+  directQaStackJson,
+  directQaStackSealed,
+}) {
+  if (kind !== "direct_qa" && !directQaStackJson) {
+    return null;
+  }
+
+  let parsed = null;
+  if (typeof directQaStackJson === "string" && directQaStackJson.trim()) {
+    try {
+      parsed = JSON.parse(directQaStackJson);
+    } catch {
+      parsed = null;
+    }
+  }
+
+  const normalized = normalizeDirectQaStackState(parsed);
+  if (directQaStackSealed) {
+    normalized.sealed = true;
+  }
+
+  if (
+    kind === "direct_qa"
+    && normalized.frames.length === 0
+    && directQaState === "awaiting_answer"
+  ) {
+    const prompt = typeof lastChallengePrompt === "string"
+      ? lastChallengePrompt.trim()
+      : "";
+    if (prompt) {
+      normalized.frames.push({
+        id: "legacy-root",
+        prompt,
+        weakPassUsed: false,
+        createdAt: null,
+      });
+    }
+  }
+
+  return normalized;
+}
+
+function resolveStudyQuestionRound(thread) {
+  if ((thread.kind ?? "study") !== "study") {
+    return 1;
+  }
+
+  const parsed = Number(thread.studyQuestionRound ?? 1);
+  if (!Number.isFinite(parsed)) {
+    return 1;
+  }
+
+  return Math.max(1, Math.round(parsed));
+}
+
+function resolveStudyQuestionRoundLimit(thread) {
+  if ((thread.kind ?? "study") !== "study") {
+    return 5;
+  }
+
+  const parsed = Number(thread.studyQuestionRoundLimit ?? 5);
+  if (!Number.isFinite(parsed)) {
+    return 5;
+  }
+
+  return Math.max(1, Math.round(parsed));
 }

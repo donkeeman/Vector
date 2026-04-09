@@ -24,6 +24,7 @@ async function main() {
     store,
     topics: [],
     llmRunner,
+    includeStudyStackDebug: config.debugEnabled,
     slackClient: new SlackWebApiClient({
       botToken: config.slackBotToken,
       channelId: config.slackChannelId,
@@ -116,6 +117,7 @@ function createLlmRunner({ config, logger }) {
       command: config.claudeCommand,
       model: config.claudeModel,
       timeoutMs: config.claudeTimeoutMs,
+      env: config.claudeEnv,
       logger,
     });
   }
@@ -123,6 +125,7 @@ function createLlmRunner({ config, logger }) {
   return new CodexCliRunner({
     command: config.codexCommand,
     model: config.codexModel,
+    env: config.codexEnv,
     logger,
   });
 }

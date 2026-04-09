@@ -75,6 +75,10 @@ test("direct_question 지시는 반말 응답을 요구한다", () => {
   const source = readFileSync(new URL("../../src/llm/codex-cli-runner.js", import.meta.url), "utf8");
 
   assert.match(source, /direct_question[\s\S]*informal speech \(banmal\)/u);
+  assert.match(source, /direct_question[\s\S]*strict style pass/u);
+  assert.match(source, /direct_question[\s\S]*clipped pseudo-banmal/u);
+  assert.match(source, /direct_question[\s\S]*deleting only "요"/u);
+  assert.doesNotMatch(source, /direct_question[\s\S]*뭐예\?/u);
 });
 
 test("direct_thread_turn 지시는 direct Q&A history를 활용한다", () => {
@@ -145,13 +149,23 @@ test("study 평가/꼬리질문/교정 지시는 lastChallengePrompt를 기준�
   assert.match(source, /teach[\s\S]*challengePrompt/u);
 });
 
+test("study turn 분류 지시는 답변/설명요청/사이드질문을 구분하고 모호하면 설명요청을 우선한다", () => {
+  const source = readFileSync(new URL("../../src/llm/codex-cli-runner.js", import.meta.url), "utf8");
+
+  assert.match(source, /classify_study_turn[\s\S]*answer_attempt\|clarification_request\|side_counterquestion/u);
+  assert.match(source, /classify_study_turn[\s\S]*Prefer clarification_request over side_counterquestion/u);
+  assert.match(source, /classify_study_turn[\s\S]*thread\.lastChallengePrompt/u);
+});
+
 test("study 지시는 retrieval context와 반복 패턴 해석 규칙을 포함한다", () => {
   const source = readFileSync(new URL("../../src/llm/codex-cli-runner.js", import.meta.url), "utf8");
 
   assert.match(source, /question[\s\S]*recentAttempts/u);
   assert.match(source, /question[\s\S]*latestTeachingMemory/u);
+  assert.match(source, /question[\s\S]*no preface statement/u);
   assert.match(source, /evaluate[\s\S]*repeat failure/u);
   assert.match(source, /evaluate[\s\S]*recovered mastery/u);
+  assert.match(source, /followup[\s\S]*no preface statement/u);
   assert.match(source, /followup[\s\S]*same misconception repeated/u);
   assert.match(source, /teach[\s\S]*same misconception repeated/u);
 });
@@ -218,6 +232,31 @@ test("direct_thread_turn task는 짧고 서툰 답변 시도도 오프트픽으�
   assert.match(source, /direct_thread_turn[\s\S]*answer quality only/u);
 });
 
+test("direct_thread_turn 지시는 operation 기반 스택 전이 계약을 포함한다", () => {
+  const source = readFileSync(new URL("../../src/llm/codex-cli-runner.js", import.meta.url), "utf8");
+
+  assert.match(source, /direct_thread_turn[\s\S]*operation/u);
+  assert.match(source, /direct_thread_turn[\s\S]*push\|pop\|stay\|close/u);
+  assert.match(source, /direct_thread_turn[\s\S]*passQuality/u);
+  assert.match(source, /direct_thread_turn[\s\S]*sealed/u);
+});
+
+test("direct_thread_turn 파서는 legacy nextState/challengePrompt를 operation 계약으로 정규화한다", () => {
+  const parsed = parseTaskResult("direct_thread_turn", {
+    outputText: JSON.stringify({
+      text: "설명은 맞췄네. 그럼 다음 확인 가자.",
+      nextState: "awaiting_answer",
+      challengePrompt: "Round Robin에서 quantum이 너무 크면 어떤 방식과 같아져?",
+    }),
+    codexThreadId: "thread-legacy",
+  });
+
+  assert.equal(parsed.operation, "push");
+  assert.equal(parsed.nextPrompt, "Round Robin에서 quantum이 너무 크면 어떤 방식과 같아져?");
+  assert.equal(parsed.passQuality, null);
+  assert.equal(parsed.codexSessionId, "thread-legacy");
+});
+
 test("direct Q&A task는 codex session id가 있으면 resume 경로를 쓴다", () => {
   const args = buildCodexExecArgs({
     taskType: "direct_thread_turn",
@@ -235,6 +274,18 @@ test("direct Q&A task는 codex session id가 있으면 resume 경로를 쓴다",
     "--skip-git-repo-check",
   ]);
   assert.match(args.join(" "), /thread-123/u);
+  assert.doesNotMatch(args.join(" "), /--ephemeral/u);
+});
+
+test("classify_study_turn task도 session-aware json 경로를 사용한다", () => {
+  const args = buildCodexExecArgs({
+    taskType: "classify_study_turn",
+    outputPath: "/tmp/classify-study-turn.json",
+    prompt: "classify prompt",
+    model: "gpt-5.4",
+  });
+
+  assert.match(args.join(" "), /--json/u);
   assert.doesNotMatch(args.join(" "), /--ephemeral/u);
 });
 
@@ -278,6 +329,17 @@ test("질문 후처리는 앞쪽 도발 질문을 버리고 기술 질문 하나
   );
 });
 
+test("질문 후처리는 앞 문장 진술이 붙어도 기술 질문 한 문장만 남긴다", () => {
+  const normalized = keepSingleQuestion(
+    "이 정도는 기본으로 알아야지. 로드 밸런싱에서 라운드 로빈이 뭐야?",
+  );
+
+  assert.equal(
+    normalized,
+    "로드 밸런싱에서 라운드 로빈이 뭐야?",
+  );
+});
+
 test("반말 후처리는 기본 존댓말 어미를 반말로 정규화한다", () => {
   const normalized = normalizeBanmalText(
     "그건 기본입니다. 다시 설명해주세요. 이 경우는 가능합니다.",
@@ -286,5 +348,61 @@ test("반말 후처리는 기본 존댓말 어미를 반말로 정규화한다",
   assert.equal(
     normalized,
     "그건 기본이야. 다시 설명해줘. 이 경우는 가능해.",
+  );
+});
+
+test("반말 후처리는 '뭐예?', '-죠' 같은 잔존 존댓말 어미도 반말로 정규화한다", () => {
+  const normalized = normalizeBanmalText(
+    "이 정도는 기본이죠. 데이터베이스 트랜잭션 격리 수준이 뭐예?",
+  );
+
+  assert.equal(
+    normalized,
+    "이 정도는 기본이지. 데이터베이스 트랜잭션 격리 수준이 뭐야?",
+  );
+});
+
+test("반말 후처리는 쉼표/따옴표가 붙은 존댓말 종결도 반말로 정규화한다", () => {
+  const normalized = normalizeBanmalText(
+    '이거 맞죠, "그 방식도 가능해요?" 이건 뭐예요?',
+  );
+
+  assert.equal(
+    normalized,
+    '이거 맞지, "그 방식도 가능해?" 이건 뭐야?',
+  );
+});
+
+test("반말 후처리는 일반 해요체도 명시 치환으로만 정규화하고 어색한 절단을 만들지 않는다", () => {
+  const normalized = normalizeBanmalText(
+    "이 방식도 해요? 그 말 맞아요, 아니에요?",
+  );
+
+  assert.equal(
+    normalized,
+    "이 방식도 해? 그 말 맞아, 아니야?",
+  );
+  assert.doesNotMatch(normalized, /뭐예\?/u);
+});
+
+test("반말 후처리는 '-겠습니다/-겠어요' 존댓말 종결도 반말로 정규화한다", () => {
+  const normalized = normalizeBanmalText(
+    "이번 정도는 맞췄다고 처리하겠습니다. 다음엔 더 정확히 보겠어요.",
+  );
+
+  assert.equal(
+    normalized,
+    "이번 정도는 맞췄다고 처리하겠어. 다음엔 더 정확히 보겠어.",
+  );
+});
+
+test("반말 후처리는 '-해보시겠어/-해주시겠어' 같은 시높임 질문형도 반말로 정규화한다", () => {
+  const normalized = normalizeBanmalText(
+    "실행 계획을 한 문장으로 정의해보시겠어? 필요하면 한 번 더 설명해주시겠어?",
+  );
+
+  assert.equal(
+    normalized,
+    "실행 계획을 한 문장으로 정의해볼래? 필요하면 한 번 더 설명해줄래?",
   );
 });

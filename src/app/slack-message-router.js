@@ -261,7 +261,7 @@ export class SlackMessageRouter {
         text: reply.text,
         recordedAt: this.now(),
       });
-      await this.store.saveThread(applyDirectQaReplyState(activeThread, reply));
+      await this.store.saveThread(applyDirectQaReplyState(activeThread, reply, this.now()));
       return null;
     } catch (error) {
       this.onError(error, event);
@@ -296,7 +296,7 @@ export class SlackMessageRouter {
       text: reply.text,
       recordedAt: this.now(),
     });
-    await this.store.saveThread(applyDirectQaReplyState(initialThread, reply));
+    await this.store.saveThread(applyDirectQaReplyState(initialThread, reply, this.now()));
   }
 
   async #appendDirectQaExchange({ threadTs, userText, assistantText, now }) {
@@ -358,25 +358,25 @@ function looksLikeDirectQuestion(text) {
     || looksLikeCounterQuestion(normalized);
 }
 
-function applyDirectQaReplyState(thread, reply) {
-  if (reply?.nextState === "awaiting_answer") {
-    return {
-      ...thread,
-      mode: "direct_qa",
-      directQaState: "awaiting_answer",
-      lastAssistantPrompt: reply.challengePrompt ?? reply.text,
-      lastChallengePrompt: reply.challengePrompt ?? reply.text ?? thread.lastChallengePrompt ?? null,
-      codexSessionId: reply.codexSessionId ?? thread.codexSessionId ?? null,
-    };
-  }
+function applyDirectQaReplyState(thread, reply, now = new Date()) {
+  const normalizedThread = normalizeDirectQaThread(thread);
+  const challengePrompt = normalizeText(reply?.challengePrompt ?? reply?.nextPrompt);
+  const isAwaitingAnswer = reply?.nextState === "awaiting_answer" && Boolean(challengePrompt);
+  const assistantPrompt = isAwaitingAnswer
+    ? challengePrompt
+    : (normalizeText(reply?.text) ?? normalizedThread.lastAssistantPrompt ?? null);
 
   return {
-    ...thread,
+    ...normalizedThread,
+    status: "open",
+    closedAt: null,
     mode: "direct_qa",
-    directQaState: "open",
-    lastAssistantPrompt: null,
-    lastChallengePrompt: null,
-    codexSessionId: reply?.codexSessionId ?? thread.codexSessionId ?? null,
+    directQaState: isAwaitingAnswer ? "awaiting_answer" : "open",
+    lastAssistantPrompt: assistantPrompt,
+    lastChallengePrompt: isAwaitingAnswer ? challengePrompt : null,
+    directQaStack: null,
+    directQaStackSealed: false,
+    codexSessionId: reply?.codexSessionId ?? normalizedThread.codexSessionId ?? null,
   };
 }
 
@@ -386,6 +386,9 @@ function normalizeDirectQaReply(reply) {
       text: reply,
       nextState: "open",
       challengePrompt: null,
+      operation: "stay",
+      nextPrompt: null,
+      passQuality: null,
       codexSessionId: null,
     };
   }
@@ -400,6 +403,11 @@ function normalizeDirectQaReply(reply) {
     text: reply?.text ?? "",
     nextState,
     challengePrompt: reply?.challengePrompt ?? null,
+    operation: normalizeOperation(reply?.operation),
+    nextPrompt: normalizeText(reply?.nextPrompt ?? null),
+    passQuality: reply?.passQuality === "weak" || reply?.passQuality === "strong"
+      ? reply.passQuality
+      : null,
     codexSessionId: reply?.codexSessionId ?? null,
   };
 }
@@ -408,9 +416,28 @@ function normalizeDirectQaThread(thread) {
   return {
     ...thread,
     mode: "direct_qa",
+    status: "open",
+    closedAt: null,
     directQaState: thread.directQaState === "awaiting_answer" ? "awaiting_answer" : "open",
-    lastAssistantPrompt: thread.lastAssistantPrompt ?? null,
-    lastChallengePrompt: thread.lastChallengePrompt ?? null,
+    directQaStack: null,
+    directQaStackSealed: false,
     codexSessionId: thread.codexSessionId ?? null,
   };
+}
+
+function normalizeOperation(operation) {
+  if (operation === "push" || operation === "pop" || operation === "stay" || operation === "close") {
+    return operation;
+  }
+
+  return null;
+}
+
+function normalizeText(text) {
+  if (typeof text !== "string") {
+    return null;
+  }
+
+  const normalized = text.trim();
+  return normalized ? normalized : null;
 }

@@ -18,12 +18,14 @@ export class ClaudeCliRunner {
     workdir = process.cwd(),
     model = null,
     timeoutMs = 120_000,
+    env = {},
     logger = NOOP_LOGGER,
   } = {}) {
     this.command = command;
     this.workdir = workdir;
     this.model = model;
     this.timeoutMs = timeoutMs;
+    this.env = normalizeEnvMap(env);
     this.logger = logger;
   }
 
@@ -60,6 +62,7 @@ export class ClaudeCliRunner {
         prompt,
         cwd: this.workdir,
         timeoutMs: this.timeoutMs,
+        env: this.env,
       }));
     } catch (error) {
       const envelope = parseClaudeResultEnvelope(error?.stdout ?? "");
@@ -170,10 +173,15 @@ function runClaudeWithStdin({
   prompt,
   cwd,
   timeoutMs,
+  env,
 }) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
+      env: {
+        ...process.env,
+        ...env,
+      },
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
@@ -220,4 +228,15 @@ function attachOutput(error, { stdout, stderr }) {
   error.stdout = stdout;
   error.stderr = stderr;
   return error;
+}
+
+function normalizeEnvMap(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([key, envValue]) => [String(key), String(envValue)]),
+  );
 }

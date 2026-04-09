@@ -19,6 +19,7 @@ export class TutorBot {
     topics,
     topicSelector = pickTopicForContinuousFlow,
     random = Math.random,
+    includeStudyStackDebug = false,
     logger = NOOP_LOGGER,
   }) {
     this.store = store;
@@ -36,6 +37,7 @@ export class TutorBot {
       topics: this.topics,
       topicSelector: this.topicSelector,
       random: this.random,
+      includeStudyStackDebug,
       logger: this.logger,
     });
     this.sessionController = createTutorSessionController({
@@ -48,6 +50,7 @@ export class TutorBot {
       store: this.store,
       llmRunner: this.llmRunner,
       slackClient: this.slackClient,
+      includeStudyStackDebug,
       logger: this.logger,
     });
   }

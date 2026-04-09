@@ -46,15 +46,41 @@ Copy `.env.example` to `.env`, then fill:
 - `SLACK_APP_TOKEN`
 - `SLACK_DM_CHANNEL_ID`
 - `LLM_PROVIDER` (`codex` or `claude`)
+- `PROVIDERS_CONFIG_PATH` (default `./config/providers.yaml`)
+- `OPENAI_API_KEY` (for codex provider config)
+- `ANTHROPIC_API_KEY` (for claude provider config)
+- `DATABASE_PATH`
+- `VECTOR_DEBUG`
+- `VECTOR_AUTO_START`
+- `VECTOR_MACOS_LIFECYCLE`
+
+Optional legacy overrides:
+
 - `CODEX_COMMAND`
 - `CODEX_MODEL`
 - `CLAUDE_COMMAND`
 - `CLAUDE_MODEL`
 - `CLAUDE_TIMEOUT_MS`
-- `DATABASE_PATH`
-- `VECTOR_DEBUG`
-- `VECTOR_AUTO_START`
-- `VECTOR_MACOS_LIFECYCLE`
+
+Provider settings are loaded from YAML (`config/providers.yaml` by default):
+
+```yaml
+defaultProvider: codex
+
+providers:
+  codex:
+    command: codex
+    model: null
+    env:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+  claude:
+    command: claude
+    model: null
+    timeoutMs: 120000
+    env:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+```
 
 ## Run Me
 

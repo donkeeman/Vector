@@ -1,0 +1,15 @@
+defaultProvider: codex
+
+providers:
+  codex:
+    command: codex
+    model: null
+    env:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+  claude:
+    command: claude
+    model: null
+    timeoutMs: 120000
+    env:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}

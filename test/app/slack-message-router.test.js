@@ -860,25 +860,22 @@ test("direct_qa 스레드 reply는 history를 싣고 direct_thread_turn으로 �
     thread_ts: "1000.9",
   });
 
-  assert.deepEqual(calls, [
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].type, "direct_thread_turn");
+  assert.equal(calls[0].payload.thread.slackThreadTs, "1000.9");
+  assert.equal(calls[0].payload.thread.kind, "direct_qa");
+  assert.equal(calls[0].payload.thread.directQaStack, null);
+  assert.deepEqual(calls[0].payload.history, [
     {
-      type: "direct_thread_turn",
-      payload: {
-        thread: store.threads.get("1000.9"),
-        history: [
-          {
-            role: "user",
-            text: "RAG가 뭐야",
-          },
-          {
-            role: "assistant",
-            text: "검색 결과를 생성에 섞는 방식이다.",
-          },
-        ],
-        text: "그럼 vector search랑 차이는?",
-      },
+      role: "user",
+      text: "RAG가 뭐야",
+    },
+    {
+      role: "assistant",
+      text: "검색 결과를 생성에 섞는 방식이다.",
     },
   ]);
+  assert.equal(calls[0].payload.text, "그럼 vector search랑 차이는?");
   assert.deepEqual(slackClient.replies, [
     {
       threadTs: "1000.9",
@@ -926,6 +923,19 @@ test("awaiting_answer 상태의 direct_qa reply도 direct_thread_turn으로 라�
     directQaState: "awaiting_answer",
     lastAssistantPrompt: "[3, 4] 벡터의 길이는 얼마지?",
     lastChallengePrompt: "[3, 4] 벡터의 길이는 얼마지?",
+    directQaStack: {
+      frames: [
+        {
+          id: "root",
+          prompt: "[3, 4] 벡터의 길이는 얼마지?",
+          weakPassUsed: false,
+          createdAt: "2026-03-10T08:01:02.000Z",
+        },
+      ],
+      sealed: false,
+      maxDepth: 5,
+    },
+    directQaStackSealed: false,
     openedAt: new Date("2026-03-10T17:01:00+09:00"),
     closedAt: null,
     lastCounterQuestionAt: null,
@@ -955,8 +965,8 @@ test("awaiting_answer 상태의 direct_qa reply도 direct_thread_turn으로 라�
         calls.push({ type, payload });
         return {
           text: "아, 역시 거기서 무너지는구나. [3, 4]의 길이는 5다.",
-          nextState: "open",
-          challengePrompt: null,
+          operation: "pop",
+          passQuality: "strong",
           codexSessionId: "thread-123",
         };
       },
@@ -975,34 +985,105 @@ test("awaiting_answer 상태의 direct_qa reply도 direct_thread_turn으로 라�
     thread_ts: "1000.92",
   });
 
-  assert.deepEqual(calls, [
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].type, "direct_thread_turn");
+  assert.equal(calls[0].payload.thread.slackThreadTs, "1000.92");
+  assert.equal(calls[0].payload.thread.kind, "direct_qa");
+  assert.equal(calls[0].payload.thread.directQaState, "awaiting_answer");
+  assert.equal(calls[0].payload.thread.directQaStack, null);
+  assert.equal(calls[0].payload.codexSessionId, "thread-123");
+  assert.deepEqual(calls[0].payload.history, [
     {
-      type: "direct_thread_turn",
-      payload: {
-        thread: challengeThread,
-        history: [
-          {
-            role: "user",
-            text: "벡터가 뭐야?",
-          },
-          {
-            role: "assistant",
-            text: "벡터는 크기와 방향을 가진 값이야. [3, 4] 벡터의 길이는 얼마지?",
-          },
-        ],
-        text: "1이잖아",
-        codexSessionId: "thread-123",
-      },
+      role: "user",
+      text: "벡터가 뭐야?",
+    },
+    {
+      role: "assistant",
+      text: "벡터는 크기와 방향을 가진 값이야. [3, 4] 벡터의 길이는 얼마지?",
     },
   ]);
+  assert.equal(calls[0].payload.text, "1이잖아");
   assert.deepEqual(slackClient.replies, [
     {
       threadTs: "1000.92",
       text: "아, 역시 거기서 무너지는구나. [3, 4]의 길이는 5다.",
     },
   ]);
+  assert.equal(store.threads.get("1000.92")?.status, "open");
+  assert.equal(store.threads.get("1000.92")?.directQaStack, null);
+  assert.equal(store.threads.get("1000.92")?.closedAt, null);
   assert.equal(store.threads.get("1000.92")?.directQaState, "open");
   assert.equal(store.threads.get("1000.92")?.mode, "direct_qa");
+});
+
+test("direct_qa는 push 요청이 와도 스택 없이 열린 상태로 계속 답한다", async () => {
+  const slackClient = createSlackClient();
+  const store = createStore();
+  const thread = {
+    slackThreadTs: "1000.93",
+    topicId: null,
+    kind: "direct_qa",
+    mode: "direct_qa",
+    status: "open",
+    codexSessionId: "thread-999",
+    directQaState: "awaiting_answer",
+    lastAssistantPrompt: "Q5",
+    lastChallengePrompt: "Q5",
+    directQaStack: {
+      frames: [
+        { id: "f1", prompt: "Q1", weakPassUsed: false, createdAt: null },
+        { id: "f2", prompt: "Q2", weakPassUsed: false, createdAt: null },
+        { id: "f3", prompt: "Q3", weakPassUsed: false, createdAt: null },
+        { id: "f4", prompt: "Q4", weakPassUsed: false, createdAt: null },
+        { id: "f5", prompt: "Q5", weakPassUsed: false, createdAt: null },
+      ],
+      sealed: true,
+      maxDepth: 5,
+    },
+    directQaStackSealed: true,
+    openedAt: new Date("2026-03-10T17:01:00+09:00"),
+    closedAt: null,
+    lastCounterQuestionAt: null,
+    lastCounterQuestionResolvedAt: null,
+  };
+  store.threads.set("1000.93", thread);
+  store.directQaMessages.set("1000.93", []);
+
+  const router = new SlackMessageRouter({
+    store,
+    tutorBot: createTutorBot(),
+    llmRunner: {
+      async runTask() {
+        return {
+          text: "좋아, 그럼 다음 질문이다.",
+          operation: "push",
+          nextPrompt: "Q6",
+          nextState: "awaiting_answer",
+          challengePrompt: "Q6",
+          codexSessionId: "thread-999",
+        };
+      },
+    },
+    slackClient,
+    now: () => new Date("2026-03-10T17:02:00+09:00"),
+  });
+
+  await router.handleMessageEvent({
+    type: "message",
+    channel_type: "im",
+    channel: "D123",
+    user: "U123",
+    text: "답은 5야",
+    ts: "1001.3",
+    thread_ts: "1000.93",
+  });
+
+  const updated = store.threads.get("1000.93");
+  assert.equal(updated?.status, "open");
+  assert.equal(updated?.directQaStack, null);
+  assert.equal(updated?.directQaStackSealed, false);
+  assert.equal(updated?.lastChallengePrompt, "Q6");
+  assert.equal(updated?.directQaState, "awaiting_answer");
 });
 
 test("direct_qa 스레드의 비기술 질문도 로컬 차단 없이 direct_thread_turn으로 넘긴다", async () => {
@@ -1060,25 +1141,22 @@ test("direct_qa 스레드의 비기술 질문도 로컬 차단 없이 direct_thr
     thread_ts: "1000.91",
   });
 
-  assert.deepEqual(calls, [
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].type, "direct_thread_turn");
+  assert.equal(calls[0].payload.thread.slackThreadTs, "1000.91");
+  assert.equal(calls[0].payload.thread.kind, "direct_qa");
+  assert.equal(calls[0].payload.thread.directQaStack, null);
+  assert.deepEqual(calls[0].payload.history, [
     {
-      type: "direct_thread_turn",
-      payload: {
-        thread: store.threads.get("1000.91"),
-        history: [
-          {
-            role: "user",
-            text: "RAG가 뭐야",
-          },
-          {
-            role: "assistant",
-            text: "검색 결과를 생성에 섞는 방식이다.",
-          },
-        ],
-        text: "오늘 점심 뭐 먹지",
-      },
+      role: "user",
+      text: "RAG가 뭐야",
+    },
+    {
+      role: "assistant",
+      text: "검색 결과를 생성에 섞는 방식이다.",
     },
   ]);
+  assert.equal(calls[0].payload.text, "오늘 점심 뭐 먹지");
   assert.deepEqual(slackClient.replies, [
     {
       threadTs: "1000.91",
